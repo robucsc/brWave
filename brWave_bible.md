@@ -1,0 +1,189 @@
+# brWave — Dev Journal & Project Bible
+
+**App name: brWave. Don't change it.**
+
+This is the living development journal and source of truth for the brWave project. Update it at the end of every session.
+
+---
+
+## What This Is
+
+brWave is a SwiftUI macOS patch editor for the Behringer WAVE synthesizer — a PPG Wave clone with 8-voice wavetable synthesis, analog VCF/VCA, 3 envelopes, arpeggiator, and sequencer. Third in a series after Sledgitor (Waldorf Sledge) and OBsixer (Sequential OB-6).
+
+Reference projects:
+- OBsixer (cleanest): `/Users/rob99/Development/Swift/swiftUI/OBsixer/`
+- Sledgitor: `/Users/rob99/Development/Swift/swiftUI/Sledgitor/`
+- AudioMorph/Hibiki (wavetable tools): `/Users/rob99/Development/Swift/swiftUI/AudioMorph/`
+
+---
+
+## Product Philosophy
+
+Unlock what the hardware can do that players don't know about. Not a generic librarian. Features ship only if they'd get personal use. The Wave's personality is its wavetable system — that's what we build around.
+
+---
+
+## Current State
+
+**Session 1 (2026-03-30): Project initialized, documentation created.**
+
+Built this session:
+- `CLAUDE.md` — full technical briefing
+- `brWave_bible.md` — this file
+- `docs/memory.md` — state memory
+
+Nothing else yet. Bare Xcode template.
+
+---
+
+## Architecture Decisions
+
+### Headline Feature: Wavetable View
+The Wave's identity is its wavetable. The headline feature is a **wavetable view** that:
+1. Sends custom wavetables from brWave to the hardware (already proven in Hibiki — port `BehringerWave.swift`)
+2. Displays the current patch's wavetable visually (64 waves as waveform images)
+   - If we can pull wavetables FROM the Wave: show them live
+   - If not: record audio out of the Wave (as done for Sledgitor) to generate static images
+3. May add wavetable generation tools (similar to Hibiki's NeuronGenerator, SuperWave, Vector) — highly likely, scope TBD
+
+**Scope boundary**: don't replicate Hibiki's full wavetable editor — that would diminish Hibiki. brWave's wavetable view is patch-centric. Deep generation/editing stays in Hibiki.
+
+**Adding generators later is low-risk**: All apps in the series use sidebar / detail / inspector layout. Hibiki's wavetable generators would slot naturally into this structure as a detail or inspector panel view. No need to pre-architect for it — add when scope is decided.
+
+**Wavetable display**: If we can't pull wavetable data from the Wave (not documented in the manual — may be impossible), displaying the actual wavetable in use becomes difficult. Options:
+1. Record audio out of the Wave for each factory wavetable and use those as static images (Sledgitor approach)
+2. Display only the wavetable NAME and POSITION (numeric), no waveform image
+3. Bundle static images of all 32 factory wavetables (record once, ship with app)
+Decision deferred until we confirm whether pull is possible.
+
+This is what makes brWave more than SynthTribe. It puts the wavetable system front and center.
+
+### Group A / Group B Panel
+Every Wave preset has two full sounds (Group A + Group B). **Decision: A/B tab toggle** — side-by-side ruled out as too visually dense.
+
+**Diff arc concept**: knobs in Group A view show a secondary (dimmer) arc indicating the Group B value for that parameter. This gives an instant visual diff without switching views. Implement as an optional second arc in `WaveControls.swift` — primary arc = active group, ghost arc = inactive group. Color TBD (probably dimmer version of the highlight color, or a neutral grey).
+
+### Bank/Program Layout
+- 2 banks × 100 programs = 200 slots
+- Bank 0 = Behringer sounds, Bank 1 = classic PPG Wave programs
+- Position math: `position = bank * 100 + program` (0–199)
+- BankMemoryView will be a 2-row × 100-column grid (or 10×10 per bank)
+
+### SysEx: No MS-bit packing
+The Wave uses raw bytes with a simple checksum — completely different from Sequential's 8-byte block packing. This makes the parser much simpler than OB6SysExParser.
+
+### NRPN: 3-message format
+```
+Bn 63 00       (CC99, MSB always 0)
+Bn 62 ParNum   (CC98, 0–46)
+Bn 06 Value    (CC6, 0–127)
+```
+No CC38 (LSB data) unlike OB-6.
+
+---
+
+## Critical Layout Rules
+
+*(None yet — will be populated as panel work begins)*
+
+---
+
+## Hard-Won Lessons (from OBsixer / Sledgitor)
+
+1. **Section padding must be identical across all style variants** or controls shift when switching styles. Always verify before calling done.
+2. **Prefer `fixedSize` over hardcoded heights** for content rows.
+3. **Every struct using environment values needs its own `@Environment` declaration** — they don't inherit.
+4. **Don't change enum rawValues** — they are `@AppStorage` keys.
+5. **Ask before structural layout changes** — cascading effects everywhere.
+6. **Knob width must be ≥ label width** or text clips.
+
+---
+
+## Session Log
+
+### Session 1 — 2026-03-30
+
+**What was done:**
+- Read full hardware manual (MIDI CCs, NRPNs, SysEx format, preset data layout)
+- Read Behringer Wave images — confirmed PPG blue aesthetic
+- Found `BehringerWave.swift` in AudioMorph — already has wavetable SysEx encode/decode
+- Read OBsixer CLAUDE.md, DEV_JOURNAL, EDITOR_STARTER_KIT
+- Created CLAUDE.md, brWave_bible.md, docs/memory.md
+- Set up Claude memory system
+
+**Pending / Blockers:**
+- PPG blue color needs visual tuning during panel work (approximate is fine to start)
+- Wavetable pull FROM the Wave: not in manual — may be impossible. Record audio out as fallback for images.
+- Wavetable generation tools: highly likely later, low effort to add (sidebar/detail/inspector fits them naturally)
+- More patch files needed for Galaxy testing — user is sourcing
+
+**Decisions made:**
+- Headline feature = wavetable view (send + display)
+- Group A/B panel: toggle (not side-by-side), with diff arc on knobs
+- Patch import priority: Behringer SYX first → PPG Wave 3.V (Waldorf virtual) second
+- FIRM=0 (compatible) for all imports by default
+- Wavetable scope boundary: don't replicate Hibiki — patch-centric only
+- Architecture follows OBsixer pattern closely
+- 200 slot bank (2×100), not 1000 like OB-6
+- Panel view: OBsixer's panel style system (profiles/styles) is more refined than Sledgitor's. Use OBsixer as the reference for the style system.
+- Panel work is the hardest part of these apps. Tuning mode (wrench/grid) is dev-only — not shipped.
+- Wave Sweeper (JS web tool) was the original source for the wavetable SysEx format. Hibiki's BehringerWave.swift is a port of that.
+
+---
+### Session 5: V8 Map Partial + Group B Confirmed (2026-04-02)
+
+**What was done:**
+- Extensive correlation analysis: factory23.syx ↔ Hardware Unit Bank.fxb (N=64 matched patches)
+- Confirmed V8 scale: full 8-bit (0-254). Conversion: Beh = V8÷2 (0-127 params) or V8÷4 (0-63 params)
+- Confirmed 6 V8 positions (see FXB_ANALYSIS.md Session 5 section for full table)
+- **Group B FXB CONFIRMED**: FPCh record N+1 = Group B, SAME float index map as Group A
+- Established blocker: remaining 44 V8 positions need Wine+waveprog.exe or PPG hardware
+- V8 factory23 patches are in same order as Hardware Unit Bank FXB but DIFFERENT order from Behringer B1
+
+**Key decision:** V8 importer needs `waveprog.exe` on Windows to complete. Move on.
+
+**Pending:**
+- V8 complete map: needs Wine/Windows + waveprog.exe to convert factory23.syx → WaveSim FXB
+- FXB importer: Group B is now unblocked (same float map). Build next.
+
+---
+
+### Session 4: The Rosetta Stone Found (2026-04-01)
+
+#### Breakthrough: FXB Float Mapping Solved
+- Using targeted `.fxp` mod files (tweaking one knob at a time), we mapped the 340-float Waldorf 3.V array with 100% precision.
+- **Critical Discovery**: Multitimbral FXB banks (like the PPG 2.3 Hardware set) do NOT store A and B sounds in a single float array. They store them as **separate sequential programs** in the VST bank (Program 0 = PPG 000 Sound A, Program 1 = PPG 000 Sound B).
+- Behavior: Program N and N+1 represent a single Behringer Dual Patch.
+- Scaling: Most continuous params (0–127) use `÷63` or `÷127` float logic. Binary toggles are `0.5 / 1.0`.
+- Documented the results in `docs/FXB_ANALYSIS.md`.
+
+#### Discovery: V8 SysEx Structure
+- Analyzed `factory23.syx` (Hermann Seib V8.x dump).
+- Bank size: 10,205 bytes => 5 byte header + (100 patches × 102 bytes).
+- Patch encoding: 102 nibbles => **51 internal bytes**.
+- **The Clue**: Behringer's standard Group A / Group B payload is also exactly 51 bytes! 
+- Verdict: Behringer cloned the V8 hardware memory structure as their native 8-bit parameter block. 
+
+#### New Forensic Assets
+- `docs/w23_fact.wav`: Authentic PPG 2.3 factory cassette dump.
+- `docs/PPG SYSEX__but not really.html`: Narkive thread confirms PPG SysEx was proprietary until V8.3 opened the floodgates.
+
+#### Next Actions
+- Build the `FXBImporter` using the 340-float map.
+- Map the 51-byte V8 hardware order (via Hermann Seib's emulator if possible) to allow import of `.syx` legacy banks.
+- Assemble the `WavePanelView` using the verified `WaveParameters.swift` offsets.
+
+### Session 2 — 2026-03-30
+**What was done:**
+- Successfully completed infrastructure port from OBsixer.
+- Verified Behringer Wave `.syx` patch import pipeline and `WaveSysExParser` correctness based on the 121-byte specification.
+- Successfully extracted the original vintage PPG wavetables from ROM dumps (`docs/PPG Wave 2.3 version v6/w23_64.bin` through `w23_6e1.bin`)! Wrote a Python script that perfectly interpolates the "missing" wave slots logic found in the hardware.
+- Exported the wavetables into `PPGWavetables.swift` as a static `[30 tables][64 slots][128 samples]` `Int8` matrix. The audio engine/UI must mirror/invert these bytes for full 256-sample playback (standard PPG half-wave storage behavior).
+- Discovered that legacy Hermann Seib V8.x patches (`factory23.syx`) are 10,205 bytes and lack public parameter maps online. Decryption is blocked until the V8 manual is located.
+- Avoided the block by writing `Patch+Generation.swift`, which outputs functionally valid 121-byte Behringer Wave patches categorized by keywords (Bass, Lead, Pad, etc.) so UI development can proceed immediately without vintage patches.
+
+**Pending / Blockers:**
+- Need the Hermann Seib V8.x SysEx extended manual from the user in order to properly translate 1980s 10KB `.syx` patch banks into the 121-byte native format.
+
+**Decisions made:**
+- Rather than waiting on legacy PPG patch documentation to build translators, we rely on the custom `.syx` Patch Generator to populate UI with test patches.
