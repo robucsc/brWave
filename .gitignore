@@ -1,0 +1,28 @@
+.DS_Store
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+
+# Build products
+build/
+DerivedData/
+
+# Swift Package Manager
+.build/
+
+# App packaging
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Temporary files
+*.swp
+*.tmp
+
+# Local notes and imported reference assets
+CLAUDE.md
+PPG_Wave_3V-macOS/
+WE2-macOS/
+Preset Patch/
+docs/

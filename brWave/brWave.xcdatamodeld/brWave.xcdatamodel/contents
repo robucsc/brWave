@@ -1,9 +1,34 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="1" systemVersion="11A491" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithCloudKit="false" userDefinedModelVersionIdentifier="">
-    <entity name="Item" representedClassName="Item" syncable="YES" codeGenerationType="class">
-        <attribute name="timestamp" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+<model type="com.apple.IDECoreDataModeler.DataModel" documentVersion="1.0" lastSavedToolsVersion="24512" systemVersion="25D2128" minimumToolsVersion="Automatic" sourceLanguage="Swift" usedWithSwiftData="YES" userDefinedModelVersionIdentifier="">
+    <entity name="Patch" representedClassName="Patch" syncable="YES" codeGenerationType="class">
+        <attribute name="bank" optional="YES" attributeType="Integer 16" defaultValueString="-1" usesScalarValueType="YES"/>
+        <attribute name="category" optional="YES" attributeType="String"/>
+        <attribute name="dateCreated" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="dateModified" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="designer" optional="YES" attributeType="String"/>
+        <attribute name="galaxyCluster" optional="YES" attributeType="String"/>
+        <attribute name="galaxyX" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
+        <attribute name="galaxyY" optional="YES" attributeType="Double" defaultValueString="0.0" usesScalarValueType="YES"/>
+        <attribute name="isFavorite" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="isTrashed" optional="YES" attributeType="Boolean" defaultValueString="NO" usesScalarValueType="YES"/>
+        <attribute name="name" optional="YES" attributeType="String"/>
+        <attribute name="program" optional="YES" attributeType="Integer 16" defaultValueString="-1" usesScalarValueType="YES"/>
+        <attribute name="rawSysexPayload" optional="YES" attributeType="Binary"/>
+        <attribute name="sequencerData" optional="YES" attributeType="Binary"/>
+        <attribute name="uuid" attributeType="UUID" usesScalarValueType="NO"/>
+        <attribute name="values" optional="YES" attributeType="Binary"/>
+        <relationship name="slots" optional="YES" toMany="YES" deletionRule="Nullify" destinationEntity="PatchSlot" inverseName="patch" inverseEntity="PatchSlot"/>
     </entity>
-    <elements>
-        <element name="Item" positionX="-63" positionY="-18" width="128" height="44"/>
-    </elements>
+    <entity name="PatchSet" representedClassName="PatchSet" syncable="YES" codeGenerationType="class">
+        <attribute name="createdAt" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="modifiedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+        <attribute name="name" attributeType="String"/>
+        <attribute name="uuid" attributeType="UUID" usesScalarValueType="NO"/>
+        <relationship name="slots" optional="YES" toMany="YES" deletionRule="Cascade" destinationEntity="PatchSlot" inverseName="patchSet" inverseEntity="PatchSlot"/>
+    </entity>
+    <entity name="PatchSlot" representedClassName="PatchSlot" syncable="YES" codeGenerationType="class">
+        <attribute name="position" attributeType="Integer 16" defaultValueString="0" usesScalarValueType="YES"/>
+        <relationship name="patch" optional="YES" maxCount="1" deletionRule="Nullify" destinationEntity="Patch" inverseName="slots" inverseEntity="Patch"/>
+        <relationship name="patchSet" maxCount="1" deletionRule="Nullify" destinationEntity="PatchSet" inverseName="slots" inverseEntity="PatchSet"/>
+    </entity>
 </model>
