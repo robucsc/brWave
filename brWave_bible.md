@@ -34,6 +34,29 @@ Built this session:
 
 Nothing else yet. Bare Xcode template.
 
+**Session 6 (2026-04-04): Sample Mapper first pass landed.**
+
+Built this session:
+- Added a new top-level `Samples` workspace in `ContentView.swift`
+- Added `SampleMapperModels.swift` for sample formats, notes, zones, loop points, and auto-mapping
+- Added `SampleMapperState.swift` for import, folder scan, root-note detection from filenames, auto-zoning, and waveform caching
+- Added `SampleMapperView.swift` with:
+  - import files / import folder actions
+  - sample list
+  - waveform strip above the keyboard
+  - keyboard zoning preview
+  - zone editor for root / low / high key
+  - basic loop start / end editing
+  - inspector content for session and selection details
+- Confirmed the first visual pass is working in-app with real sample sets
+
+Current quality:
+- Good first-pass workflow and layout
+- Filename-based root-note detection is working well for named samples
+- Waveform display is live for AVFoundation-readable files
+- Loop visualization exists, but handle interaction still needs refinement
+- Broader format support should be pulled from Hibiki next
+
 ---
 
 ## Architecture Decisions
@@ -100,6 +123,42 @@ No CC38 (LSB data) unlike OB-6.
 ---
 
 ## Session Log
+
+### Session 6 — 2026-04-04
+
+**What was done:**
+- Started the universal sample keymapper as a real top-level `Samples` view in brWave
+- Implemented support scaffolding for `wav`, `aiff/aif`, `yaf`, `sdi`, and `sdii` as recognized target formats
+- Built the first auto-map engine using filename-detected root notes plus configurable lower/upper reach
+- Added a keyboard zoning view so sample ranges can be seen at a glance
+- Added sample detail editing for root, low, and high key
+- Added a waveform strip above the keyboard and selection-aware waveform switching
+- Added a basic inspector payload so the right panel shows sample/session metadata instead of staying empty
+- Verified the mapper is visually usable with a real imported sample set
+
+**Decisions made:**
+- The sample mapper should live as a dedicated workspace, not inside the patch editor
+- Iterative design is expected; this feature will evolve in-place as real use reveals what matters
+- The waveform strip belongs above the keyboard
+- Inspector space should be used intentionally for sample/session metadata
+- Hibiki is the long-term source for broader audio/file-format support and richer waveform handling
+
+**What is working now:**
+- Import sample files
+- Import a whole folder recursively
+- Auto-assign zones from detected note names
+- Show current sample waveform
+- Show keyboard map for current imported set
+- Edit root / low / high values
+- Basic loop start / end values
+
+**Immediate next steps:**
+1. Improve loop-handle drag behavior and visibility
+2. Move more of the sample/session metadata into a stronger inspector layout
+3. Pull waveform/file support from Hibiki instead of relying only on AVAudioFile
+4. Add real pitch detection from audio, not just filename parsing
+5. Add sample start/end support to the model, even if the synth doesn't use it yet
+6. After the mapper stabilizes, begin the wavetable view work
 
 ### Session 1 — 2026-03-30
 
