@@ -87,6 +87,7 @@ struct ContentView: View {
     @State private var inspectorPresented = true
     @State private var inspectorContent   = InspectorBox(id: "empty", view: AnyView(EmptyView()))
     @State private var showingNamesSheet   = false
+    @StateObject private var sampleMapperState = SampleMapperState()
     @AppStorage("patchListVisible") private var patchListVisible = true
 
     @EnvironmentObject var bankEditorState: BankEditorState
@@ -152,7 +153,11 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView(selection: $sidebarSelection, viewMode: $viewMode)
         } detail: {
-            DetailView(viewMode: $viewMode, patchListVisible: $patchListVisible)
+            DetailView(
+                viewMode: $viewMode,
+                patchListVisible: $patchListVisible,
+                sampleMapperState: sampleMapperState
+            )
                 .onPreferenceChange(InspectorContentKey.self) { box in
                     if inspectorContent.id != box.id { inspectorContent = box }
                 }
@@ -366,6 +371,7 @@ struct SidebarView: View {
 struct DetailView: View {
     @Binding var viewMode: AppViewMode
     @Binding var patchListVisible: Bool
+    @ObservedObject var sampleMapperState: SampleMapperState
 
     @EnvironmentObject var bankEditorState: BankEditorState
     @EnvironmentObject var patchSelection:  PatchSelection
@@ -386,7 +392,7 @@ struct DetailView: View {
                     .frame(maxWidth: .infinity)
             }
         case .samples:
-            SampleMapperView()
+            SampleMapperView(mapper: sampleMapperState)
         case .banks:
             BankMemoryView(scrollToBank: 0)
         case .galaxy:

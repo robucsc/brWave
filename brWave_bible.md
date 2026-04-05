@@ -57,6 +57,26 @@ Current quality:
 - Loop visualization exists, but handle interaction still needs refinement
 - Broader format support should be pulled from Hibiki next
 
+**Session 7 (2026-04-04): Sample Mapper interaction pass in progress.**
+
+Built this session:
+- Moved Sample Mapper state into the app workspace so switching away from the view no longer clears the imported sample set
+- Added waveform zoom state, pan state, and a new native interaction capture layer for waveform gestures
+- Reworked waveform drawing from simple vertical sticks toward a filled envelope display
+- Added root-conflict detection between filename note and analyzed audio pitch, with a user-facing resolution prompt
+- Added more active inspector support, including path privacy/display controls
+- Reworked the keybed and zone display for better readability
+- Made zone bars clickable so selecting a zone selects the matching sample
+- Continued tightening zone geometry and lane assignment to reduce false visual overlap
+
+Current quality:
+- The mapper is clearly usable and now survives view switching
+- Keyboard readability is much better than the first pass
+- Waveform zoom is partly working, but pan and loop-handle interaction still need another pass
+- Auto-map logic around duplicate or tightly packed roots still needs more validation
+- Heads-up display is much closer, but still needs final collision/layout polish
+- Hibiki remains the right next source for mature waveform interaction behavior
+
 ---
 
 ## Architecture Decisions
@@ -123,6 +143,52 @@ No CC38 (LSB data) unlike OB-6.
 ---
 
 ## Session Log
+
+### Session 7 — 2026-04-04
+
+**What was done:**
+- Persisted sample-mapper state across app mode changes by moving ownership of `SampleMapperState` up into `ContentView`
+- Added waveform zoom and pan state to the mapper
+- Replaced the simple stick-style waveform with a filled envelope display
+- Added an AppKit-backed waveform interaction layer for zoom/pan experiments
+- Added root-conflict detection between filename-derived pitch and analyzed pitch
+- Added a settings preference for inspector path display plus an expandable path row
+- Made zone bars clickable and selection-aware
+- Reworked zone lanes so non-overlapping ranges can share a row instead of always alternating
+- Continued tuning keyboard proportions and black-key geometry
+- Began shifting zone geometry from rough width estimates toward note-boundary-based positioning
+
+**What is working now:**
+- Import files/folders
+- Sample mapper state survives switching away from Samples and back
+- Root conflict prompt appears when filename and analysis disagree
+- Waveform can zoom
+- Zone bars can select samples
+- Inspector carries much more useful state than the first pass
+
+**What still needs attention next:**
+1. Waveform interaction polish:
+   - pan is still unreliable / absent in practice
+   - loop handles and zoom/pan hit targets still compete
+   - zoom should continue to anchor cleanly around the pointer
+2. Heads-up cleanup:
+   - keep HUD elements from colliding
+   - keep label/value readouts on one line with stable reserved width
+3. Auto-map cleanup:
+   - validate duplicate-root handling
+   - eliminate remaining visual/playable overlap in crowded groups
+4. Keyboard polish:
+   - continue black-key proportion tuning toward a more realistic piano ratio
+   - later add keyboard viewport shifting for wider MIDI range
+5. Hibiki integration:
+   - bring over the mature waveform zoom/pan/detail behavior rather than continuing to solve it piecemeal here
+
+**Decisions clarified this session:**
+- Key playback should be straight sample playback only for now
+- Loop playback belongs to the loop editor, not the keybed audition path
+- Clean butt-joint zones matter more than forcing the root note to stay inside the playable span
+- The mapper architecture should stay universal so it can later move into Sledgitor and other sample-capable apps
+- User-facing terminology in brWave will likely shift from `Samples` toward `Transients`, matching PPG/WAVE language
 
 ### Session 6 — 2026-04-04
 

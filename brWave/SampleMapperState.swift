@@ -11,11 +11,27 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class SampleMapperState: ObservableObject {
+    struct RootConflictChoice: Identifiable {
+        enum Resolution {
+            case filename
+            case analyzed
+        }
+
+        let id = UUID()
+        let sampleID: UUID
+        let filename: String
+        let filenameRoot: SampleNote
+        let analyzedRoot: SampleNote
+    }
+
     @Published var samples: [SampleZone] = []
     @Published var selectedSampleID: UUID?
     @Published var lowerReachSemitones: Int = 5
     @Published var upperReachSemitones: Int = 7
+    @Published var waveformZoom: Double = 1.0
+    @Published var waveformPan: Double = 0.0
     @Published private(set) var waveformCache: [UUID: SampleWaveform] = [:]
+    @Published var rootConflictChoice: RootConflictChoice?
 
     var selectedSample: SampleZone? {
         get { samples.first(where: { $0.id == selectedSampleID }) }
@@ -122,11 +138,15 @@ final class SampleMapperState: ObservableObject {
         if let firstID = samples.first?.id {
             selectSample(firstID)
         }
+
+        queueRootConflictPromptIfNeeded()
     }
 
     private func buildSample(from url: URL) -> SampleZone? {
         guard let format = SampleFileFormat.from(url: url) else { return nil }
-        let detectedRoot = SamplePitchDetector.detectRootNote(from: url)
+        let filenameRoot = SamplePitchDetector.detectFilenameRootNote(from: url)
+        let analyzedRoot = SamplePitchDetector.detectAnalyzedRootNote(from: url)
+        let detectedRoot = analyzedRoot ?? filenameRoot
         let initialRoot = detectedRoot ?? .c3
         let fileAttributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (fileAttributes?[.size] as? NSNumber)?.int64Value ?? 0
@@ -142,12 +162,41 @@ final class SampleMapperState: ObservableObject {
             lowNote: initialRoot,
             highNote: initialRoot,
             detectedRootNote: detectedRoot,
+            filenameRootNote: filenameRoot,
+            analyzedRootNote: analyzedRoot,
             loopPoints: SampleLoopPoints(startFrame: 0, endFrame: totalFrames ?? 0),
             totalFrames: totalFrames,
             sampleRate: metadata.sampleRate,
             channelCount: metadata.channelCount,
             fileSize: fileSize
         )
+    }
+
+    func resolveRootConflict(using resolution: RootConflictChoice.Resolution) {
+        guard let choice = rootConflictChoice,
+              let index = samples.firstIndex(where: { $0.id == choice.sampleID }) else {
+            rootConflictChoice = nil
+            return
+        }
+
+        let chosenRoot: SampleNote
+        switch resolution {
+        case .filename:
+            chosenRoot = choice.filenameRoot
+        case .analyzed:
+            chosenRoot = choice.analyzedRoot
+        }
+        samples[index].rootNote = chosenRoot
+        samples[index].detectedRootNote = chosenRoot
+        samples[index].filenameRootNote = chosenRoot
+        samples[index].analyzedRootNote = chosenRoot
+        samples = SampleAutoMapper.assignZones(
+            samples,
+            lowerReach: lowerReachSemitones,
+            upperReach: upperReachSemitones
+        )
+        rootConflictChoice = nil
+        queueRootConflictPromptIfNeeded()
     }
 
     private func recursiveSampleURLs(in directory: URL) -> [URL] {
@@ -193,7 +242,7 @@ final class SampleMapperState: ObservableObject {
         }
     }
 
-    private static func readWaveform(from url: URL) -> SampleWaveform? {
+    nonisolated private static func readWaveform(from url: URL) -> SampleWaveform? {
         guard let file = try? AVAudioFile(forReading: url) else { return nil }
         let processingFormat = file.processingFormat
         let frameCount = AVAudioFrameCount(file.length)
@@ -233,5 +282,19 @@ final class SampleMapperState: ObservableObject {
         }
 
         return SampleWaveform(totalFrames: totalFrames, peaks: peaks)
+    }
+
+    private func queueRootConflictPromptIfNeeded() {
+        guard rootConflictChoice == nil else { return }
+        guard let conflicted = samples.first(where: \.rootDetectionConflict),
+              let filenameRoot = conflicted.filenameRootNote,
+              let analyzedRoot = conflicted.analyzedRootNote else { return }
+
+        rootConflictChoice = RootConflictChoice(
+            sampleID: conflicted.id,
+            filename: conflicted.displayName,
+            filenameRoot: filenameRoot,
+            analyzedRoot: analyzedRoot
+        )
     }
 }

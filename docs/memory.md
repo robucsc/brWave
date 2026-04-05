@@ -6,7 +6,7 @@ State file for session continuity. Update at end of each session. This is the qu
 
 ## Current State (2026-04-04)
 
-**Phase**: Session 6 complete. First-pass Sample Mapper is now live as a top-level workspace. FXB/V8 work remains important, but today's progress shifted the active front to sample/transient mapping.
+**Phase**: Session 7 in progress. The Sample Mapper is now a durable top-level workspace with much stronger interaction, but waveform pan/loop interaction and crowded auto-map cases still need another pass.
 
 **What exists:**
 - `CLAUDE.md` at project root — full technical briefing, read first
@@ -28,26 +28,30 @@ State file for session continuity. Update at end of each session. This is the qu
 - `ContentView.swift` — new top-level `Samples` mode in the app mode picker
 - Waveform strip above the keyboard for the selected sample
 - Inspector payload for sample/session metadata in Samples mode
+- Mapper state now survives switching away from Samples and back
+- Waveform zoom path is in progress
+- Root conflict prompt exists when filename note and analyzed pitch disagree
+- Zone bars can select samples directly
+- Keyboard/zone layout has been substantially improved from the first pass
 
-**Session 3 UI changes:**
-- **Multi-select sidebar**: `sidebarSelection` changed to `Set<SidebarItem>`; `handleSidebarChange()` method; `BankSource` struct for multi-bank display
-- **BankMemoryView flat mode**: All Patches / Favorites / Trash in Banks view now show full uncapped list via `isFlatMode` / `flatGrid` path
-- **Apply Names from Clipboard**: Library menu → sheet with bank/library picker and preview table; names truncated to 16 chars
-- **Sidebar stays in Banks mode** when selecting banks/libraries — viewMode not forced to editor
-
-**What's next tonight:**
-1. **Sample Mapper polish first**:
-   - improve loop-handle dragging and visibility
-   - improve waveform header/layout spacing
-   - use the inspector more heavily for sample metadata and mapping state
-2. **Hibiki integration path**:
-   - pull broader file loading / waveform support from AudioMorph-Hibiki
-   - stop relying only on AVAudioFile for readable formats
-3. **Pitch detection**:
-   - add actual audio pitch analysis rather than filename-only detection
-4. **Zone model expansion**:
-   - add sample start/end support to the mapper model
-5. **Then resume headline work**:
+**What's next from here:**
+1. **Waveform interaction pass**:
+   - get pan working reliably with zoom
+   - stop loop handles and zoom/pan hit targets from fighting each other
+   - keep zoom centered around the pointer
+2. **HUD cleanup**:
+   - keep heads-up values from colliding
+   - keep label/value pills on one line with reserved width
+3. **Auto-map cleanup**:
+   - validate duplicate-root handling
+   - eliminate remaining visible/playable overlap in crowded groups
+4. **Keyboard polish**:
+   - continue black-key proportion tuning
+   - later add keyboard viewport shifting across broader MIDI range
+5. **Hibiki integration path**:
+   - pull the mature waveform zoom/pan/detail model from AudioMorph/Hibiki
+   - stop solving waveform interaction piecemeal here
+6. **Then resume headline work**:
    - wavetable view remains the signature brWave feature after the mapper stabilizes
 
 **V8 partial map (confirmed positions):**
@@ -89,6 +93,9 @@ State file for session continuity. Update at end of each session. This is the qu
 - **Samples workspace**: sample/transient mapping lives as a full workspace, not a patch-editor subpanel.
 - **Waveform placement**: selected sample waveform belongs above the keyboard map.
 - **Inspector usage**: the third panel should actively support the mapper, not sit mostly idle.
+- **Playback split**: key playback should be straight-sample playback for now; loop playback belongs to the loop editor.
+- **Zone philosophy**: clean butt-joint zones are preferred over forcing the root note to remain inside the playable span.
+- **Terminology direction**: user-facing language will likely move from `Samples` toward `Transients` for brWave.
 
 ---
 
