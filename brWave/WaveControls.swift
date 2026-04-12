@@ -63,6 +63,9 @@ struct WaveKnobControl: View {
     @State private var isUserDragging = false
     @State private var isHovering = false
     @State private var animatedValue: Double = 0  // tracks active group, animated
+    @State private var isEditingValue = false
+    @State private var editingText = ""
+    @State private var shouldFocusEditor = false
 
     private var descriptor: WaveParamDescriptor? { WaveParameters.byID[id] }
     private var currentValue: Int { patch.value(for: id, group: group) }
@@ -123,9 +126,7 @@ struct WaveKnobControl: View {
                     }
                 }
 
-            Text("\(currentValue)")
-                .font(.system(size: effectiveValueSize, weight: .black, design: .monospaced))
-                .foregroundStyle(activeColor)
+            valueEditor
         }
         .nudgeable(id: id.rawValue, controlType: .knob(size: effectiveKnobSize))
     }
@@ -256,6 +257,139 @@ struct WaveKnobControl: View {
         let raw = Int(round(lo + clamped * (hi - lo)))
         patch.setValue(raw, for: id, group: group)
         animatedValue = clamped
+    }
+
+    @ViewBuilder
+    private var valueEditor: some View {
+        if isEditingValue {
+            WaveInlineNumberTextField(
+                text: $editingText,
+                shouldFocus: $shouldFocusEditor,
+                onCommit: commitValueEdit,
+                onCancel: cancelValueEdit,
+                textColor: activeColor
+            )
+            .frame(width: max(42, effectiveKnobSize - 12), height: 18)
+        } else {
+            Text("\(currentValue)")
+                .font(.system(size: effectiveValueSize, weight: .black, design: .monospaced))
+                .foregroundStyle(activeColor)
+                .lineLimit(1)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { beginValueEdit() }
+        }
+    }
+
+    private func beginValueEdit() {
+        editingText = "\(currentValue)"
+        isEditingValue = true
+        shouldFocusEditor = true
+    }
+
+    private func commitValueEdit() {
+        guard let d = descriptor,
+              let typedValue = Int(editingText.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            cancelValueEdit()
+            return
+        }
+
+        let raw = min(max(typedValue, d.range.lowerBound), d.range.upperBound)
+        let lo = Double(d.range.lowerBound)
+        let hi = Double(d.range.upperBound)
+        let normalized = hi > lo ? (Double(raw) - lo) / (hi - lo) : 0
+        patch.setValue(raw, for: id, group: group)
+        animatedValue = normalized
+        isEditingValue = false
+        shouldFocusEditor = false
+    }
+
+    private func cancelValueEdit() {
+        isEditingValue = false
+        shouldFocusEditor = false
+    }
+}
+
+private struct WaveInlineNumberTextField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var shouldFocus: Bool
+
+    let onCommit: () -> Void
+    let onCancel: () -> Void
+    let textColor: Color
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, shouldFocus: $shouldFocus, onCommit: onCommit, onCancel: onCancel)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField()
+        field.delegate = context.coordinator
+        field.isBordered = false
+        field.focusRingType = .none
+        field.drawsBackground = true
+        field.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.35)
+        field.textColor = NSColor(textColor)
+        field.alignment = .center
+        field.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .medium)
+        field.stringValue = text
+        return field
+    }
+
+    func updateNSView(_ nsView: NSTextField, context: Context) {
+        if nsView.stringValue != text {
+            nsView.stringValue = text
+        }
+        nsView.textColor = NSColor(textColor)
+
+        if shouldFocus, nsView.window != nil, nsView.currentEditor() == nil {
+            nsView.window?.makeFirstResponder(nsView)
+            DispatchQueue.main.async {
+                nsView.currentEditor()?.selectAll(nil)
+                shouldFocus = false
+            }
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        @Binding var text: String
+        @Binding var shouldFocus: Bool
+
+        let onCommit: () -> Void
+        let onCancel: () -> Void
+        private var didHandleCommand = false
+
+        init(text: Binding<String>, shouldFocus: Binding<Bool>, onCommit: @escaping () -> Void, onCancel: @escaping () -> Void) {
+            _text = text
+            _shouldFocus = shouldFocus
+            self.onCommit = onCommit
+            self.onCancel = onCancel
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard let field = obj.object as? NSTextField else { return }
+            text = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            switch commandSelector {
+            case #selector(NSResponder.insertNewline(_:)):
+                didHandleCommand = true
+                onCommit()
+                return true
+            case #selector(NSResponder.cancelOperation(_:)):
+                didHandleCommand = true
+                onCancel()
+                return true
+            default:
+                return false
+            }
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            defer { didHandleCommand = false }
+            if didHandleCommand { return }
+            onCancel()
+        }
     }
 }
 
