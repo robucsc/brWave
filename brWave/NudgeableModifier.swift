@@ -29,6 +29,10 @@ struct PanelZoomScaleKey: EnvironmentKey {
     static let defaultValue: CGFloat = 1.0
 }
 
+struct WaveUsesCanonicalLayoutKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
 extension EnvironmentValues {
     var isTuningMode: Bool {
         get { self[TuningModeKey.self] }
@@ -37,6 +41,10 @@ extension EnvironmentValues {
     var panelZoomScale: CGFloat {
         get { self[PanelZoomScaleKey.self] }
         set { self[PanelZoomScaleKey.self] = newValue }
+    }
+    var waveUsesCanonicalLayout: Bool {
+        get { self[WaveUsesCanonicalLayoutKey.self] }
+        set { self[WaveUsesCanonicalLayoutKey.self] = newValue }
     }
 }
 
@@ -69,7 +77,9 @@ struct NudgeControlInspector: View {
     let id:          String
     let controlType: NudgeControlType?
     @ObservedObject var offsetService: LayoutOffsetService
+    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
     @Environment(\.panelZoomScale) var zoom
+    @Environment(\.waveUsesCanonicalLayout) private var waveUsesCanonicalLayout
 
     private var nudgeStyle: NudgeStyle { offsetService.style(for: id) }
 
@@ -181,10 +191,12 @@ struct NudgeControlInspector: View {
 
             Divider()
 
-            let offset = offsetService.offset(for: id)
+            let offset = waveUsesCanonicalLayout
+                ? canonicalLayoutService.origin(for: id).map { CGSize(width: $0.x, height: $0.y) } ?? .zero
+                : offsetService.offset(for: id)
             if offset != .zero {
                 HStack(spacing: 12) {
-                    Text("OFFSET")
+                    Text(waveUsesCanonicalLayout ? "ORIGIN" : "OFFSET")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundColor(.secondary)
                     Text("x \(Int(offset.width))  y \(Int(offset.height))")
@@ -193,7 +205,11 @@ struct NudgeControlInspector: View {
             }
 
             Button("Reset Position & Fonts") {
-                offsetService.resetOffset(id)
+                if waveUsesCanonicalLayout {
+                    canonicalLayoutService.resetControlPosition(id)
+                } else {
+                    offsetService.resetOffset(id)
+                }
                 offsetService.resetStyle(id)
             }
             .font(.system(size: 11))
@@ -220,25 +236,40 @@ struct NudgeableModifier: ViewModifier {
     let id:          String
     var controlType: NudgeControlType? = nil
     @ObservedObject var offsetService  = LayoutOffsetService.shared
+    @ObservedObject var canonicalLayoutService = WavePanelLayoutService.shared
     @Environment(\.isTuningMode) var isTuningMode
+    @Environment(\.waveUsesCanonicalLayout) private var waveUsesCanonicalLayout
 
     @State private var showInspector = false
 
     func body(content: Content) -> some View {
-        let storedOffset  = offsetService.offset(for: id)
-        let dynamicDelta  = offsetService.selectedIDs.contains(id) ? offsetService.activeDragDelta : .zero
+        let baseFrame = canonicalLayoutService.baseFrames[id] ?? .zero
+        let storedOffset = if waveUsesCanonicalLayout,
+                              let origin = canonicalLayoutService.origin(for: id),
+                              baseFrame != .zero {
+            CGSize(width: origin.x - baseFrame.minX, height: origin.y - baseFrame.minY)
+        } else {
+            offsetService.offset(for: id)
+        }
+        let dynamicDelta = if waveUsesCanonicalLayout {
+            canonicalLayoutService.selectedIDs.contains(id) ? canonicalLayoutService.activeDragDelta : .zero
+        } else {
+            offsetService.selectedIDs.contains(id) ? offsetService.activeDragDelta : .zero
+        }
         let currentOffset = CGSize(
             width:  storedOffset.width  + dynamicDelta.width,
             height: storedOffset.height + dynamicDelta.height
         )
 
         content
-            .allowsHitTesting(!isTuningMode)
+            .allowsHitTesting(!(isTuningMode && waveUsesCanonicalLayout) && !isTuningMode)
             .overlay(
                 ZStack {
                     if isTuningMode {
-                        let isSelected  = offsetService.selectedIDs.contains(id)
-                        let isKeyObject = offsetService.keyObjectID == id && isSelected
+                        let selectionIDs = waveUsesCanonicalLayout ? canonicalLayoutService.selectedIDs : offsetService.selectedIDs
+                        let keyObjectID = waveUsesCanonicalLayout ? canonicalLayoutService.keyObjectID : offsetService.keyObjectID
+                        let isSelected  = selectionIDs.contains(id)
+                        let isKeyObject = keyObjectID == id && isSelected
 
                         RoundedRectangle(cornerRadius: 6)
                             .fill(isSelected ? Theme.waveHighlight.opacity(0.15) : Color.clear)
@@ -260,15 +291,29 @@ struct NudgeableModifier: ViewModifier {
                                     offsetService.setHighlighted(id, !isHighlighted)
                                 }
                                 Button("Set as Key Object") {
-                                    offsetService.select(id, exclusive: false)
-                                    offsetService.keyObjectID = id
+                                    if waveUsesCanonicalLayout {
+                                        canonicalLayoutService.select(id, exclusive: false)
+                                    } else {
+                                        offsetService.select(id, exclusive: false)
+                                        offsetService.keyObjectID = id
+                                    }
                                 }
-                                .disabled(!offsetService.selectedIDs.contains(id))
+                                .disabled(!selectionIDs.contains(id))
                                 Divider()
-                                Button("Reset Position") { offsetService.resetOffset(id) }
+                                Button("Reset Position") {
+                                    if waveUsesCanonicalLayout {
+                                        canonicalLayoutService.resetControlPosition(id)
+                                    } else {
+                                        offsetService.resetOffset(id)
+                                    }
+                                }
                                 Button("Reset Fonts")    { offsetService.resetStyle(id)  }
                                 Button("Reset All") {
-                                    offsetService.resetOffset(id)
+                                    if waveUsesCanonicalLayout {
+                                        canonicalLayoutService.resetControlPosition(id)
+                                    } else {
+                                        offsetService.resetOffset(id)
+                                    }
                                     offsetService.resetStyle(id)
                                 }
                             }
@@ -288,8 +333,16 @@ struct NudgeableModifier: ViewModifier {
                 }
             )
             .offset(currentOffset)
-            .onAppear    { DispatchQueue.main.async { offsetService.register(id)   } }
-            .onDisappear { DispatchQueue.main.async { offsetService.unregister(id) } }
+            .onAppear {
+                if !waveUsesCanonicalLayout {
+                    DispatchQueue.main.async { offsetService.register(id) }
+                }
+            }
+            .onDisappear {
+                if !waveUsesCanonicalLayout {
+                    DispatchQueue.main.async { offsetService.unregister(id) }
+                }
+            }
     }
 }
 

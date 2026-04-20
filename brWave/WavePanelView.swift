@@ -5,21 +5,115 @@
 //  Main patch panel editor — PPG Wave / Axel Hartmann aesthetic.
 //  Two-row layout:
 //    Row 1: LFO · MODULATION · WAVES · PITCH ENV
-//    Row 2: CONTROLS · FILTER · WAVE ENV · AMP ENV · ROUTING · PERFORMANCE
+//    Row 2: CONTROLS · FILTER/WAVE ENV · AMP ENV · ROUTING · PERFORMANCE
 //
 //  All stepped digital params use WaveKnobControl (mini) instead of +/– buttons.
 //  Concentric dual arcs show A/B group diff on every per-group knob.
 //
 
 import SwiftUI
+import AppKit
+
+private struct WavePanelResizeHandleView: NSViewRepresentable {
+    let panelID: String
+    let naturalSize: CGSize
+    let layoutService: WavePanelLayoutService
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(panelID: panelID, layoutService: layoutService)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        context.coordinator.naturalSize = naturalSize
+        return context.coordinator.handleView
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.naturalSize = naturalSize
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.teardown()
+    }
+
+    final class Coordinator {
+        let panelID: String
+        let layoutService: WavePanelLayoutService
+        var naturalSize: CGSize = .zero
+        private var dragStartSize: CGSize = .zero
+        private var liveDragSize: CGSize = .zero
+        private var dragStartPoint: NSPoint = .zero
+        private var isDragging = false
+        private var monitor: Any?
+        let handleView = NSView()
+
+        init(panelID: String, layoutService: WavePanelLayoutService) {
+            self.panelID = panelID
+            self.layoutService = layoutService
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) {
+                [weak self] event in self?.handle(event) ?? event
+            }
+        }
+
+        private func handle(_ event: NSEvent) -> NSEvent? {
+            guard handleView.window != nil, handleView.superview != nil else { return event }
+            let handleInWindow = handleView.convert(handleView.bounds, to: nil)
+            let over = handleInWindow.contains(event.locationInWindow)
+
+            switch event.type {
+            case .leftMouseDown where over:
+                if event.clickCount == 2 {
+                    DispatchQueue.main.async {
+                        self.layoutService.resetSectionSize(self.panelID)
+                    }
+                } else {
+                    dragStartSize = layoutService.size(for: panelID) ?? naturalSize
+                    liveDragSize = dragStartSize
+                    dragStartPoint = event.locationInWindow
+                    isDragging = true
+                }
+                return nil
+            case .leftMouseDragged where isDragging:
+                let dx = event.locationInWindow.x - dragStartPoint.x
+                let dy = -(event.locationInWindow.y - dragStartPoint.y)
+                liveDragSize = CGSize(
+                    width: max(80, dragStartSize.width + dx),
+                    height: max(40, dragStartSize.height + dy)
+                )
+                DispatchQueue.main.async {
+                    self.layoutService.setSectionSizeLive(self.panelID, size: self.liveDragSize)
+                }
+                return nil
+            case .leftMouseUp where isDragging:
+                isDragging = false
+                DispatchQueue.main.async {
+                    self.layoutService.setSectionSize(self.panelID, size: self.liveDragSize)
+                }
+                return nil
+            default:
+                return event
+            }
+        }
+
+        func teardown() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
+    }
+}
 
 // MARK: - WavePanelView
 
 struct WavePanelView: View {
     @ObservedObject var patch: Patch
 
+    // Give the top row enough working room to keep tuning-mode controls visible.
+    // This is intentionally taller than the previous first-pass minimum.
+    private let topRowSectionMinHeight: CGFloat = 340
+
     @AppStorage("wavePanelGroup") private var selectedGroup: WaveGroup = .a
     @State private var isTuningMode: Bool = false
+    @State private var tuningGestureActive = false
 
     @State private var zoomScale: CGFloat = 1.0
     @State private var lastZoom: CGFloat = 1.0
@@ -27,9 +121,9 @@ struct WavePanelView: View {
     @State private var naturalContentSize: CGSize = .zero
     @State private var zoomAnchor: UnitPoint = .center
     @State private var lastMouseLocation: CGPoint = .zero
-    @State private var tuningDragStart: CGPoint = .zero
 
     @ObservedObject private var layoutService = LayoutOffsetService.shared
+    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -45,12 +139,19 @@ struct WavePanelView: View {
                     HStack(alignment: .top, spacing: 20) {
                         lfoSection
                             .frame(width: 220)
+                            .frame(minHeight: topRowSectionMinHeight, alignment: .top)
                             .frame(maxHeight: .infinity)
                         modulationSection
                             .frame(width: 220)
+                            .frame(minHeight: topRowSectionMinHeight, alignment: .top)
                             .frame(maxHeight: .infinity)
-                        wavesPitchSection
-                            .frame(width: 270)
+                        wavesSection
+                            .frame(width: 220)
+                            .frame(minHeight: topRowSectionMinHeight, alignment: .top)
+                            .frame(maxHeight: .infinity)
+                        pitchEnvSection
+                            .frame(width: 220)
+                            .frame(minHeight: topRowSectionMinHeight, alignment: .top)
                             .frame(maxHeight: .infinity)
                     }
                     .fixedSize(horizontal: false, vertical: true)
@@ -100,10 +201,12 @@ struct WavePanelView: View {
                 )
             }
             .coordinateSpace(name: "wavePanel")
+            .scrollDisabled(isTuningMode)
             .scrollIndicators(.hidden)
             .onPreferenceChange(NudgeFrameKey.self) { frames in
                 DispatchQueue.main.async {
-                    for (id, frame) in frames { layoutService.reportFrame(id, frame) }
+                    for (id, frame) in frames { canonicalLayoutService.reportFrame(id, frame) }
+                    canonicalLayoutService.migrateLegacyOffsetsIfNeeded(layoutService.offsets)
                 }
             }
             .onContinuousHover { phase in
@@ -125,31 +228,68 @@ struct WavePanelView: View {
                     }
                     .onEnded { _ in isPinching = false; lastZoom = zoomScale }
             )
-            .if(isTuningMode) { view in
-                view.gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { drag in
-                            if drag.translation == .zero {
-                                let shift = NSEvent.modifierFlags.contains(.shift)
-                                layoutService.selectAtPoint(drag.location, shift: shift)
-                                tuningDragStart = drag.location
-                            } else {
-                                layoutService.updateDrag(delta: drag.translation)
-                            }
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named("wavePanel"))
+                    .onChanged { value in
+                        guard isTuningMode else { return }
+                        if !tuningGestureActive {
+                            tuningGestureActive = true
+                            let shift = NSEvent.modifierFlags.contains(.shift)
+                            canonicalLayoutService.selectAtPoint(value.startLocation, shift: shift)
                         }
-                        .onEnded { _ in layoutService.commitDrag() }
-                )
-            }
+                        guard !canonicalLayoutService.selectedIDs.isEmpty else { return }
+                        var translation = value.translation
+                        if NSEvent.modifierFlags.contains(.shift) {
+                            abs(translation.width) > abs(translation.height)
+                                ? (translation.height = 0)
+                                : (translation.width = 0)
+                        }
+                        let grid: CGFloat = 2
+                        translation.width = round(translation.width / grid) * grid
+                        translation.height = round(translation.height / grid) * grid
+                        canonicalLayoutService.updateDrag(delta: translation)
+                    }
+                    .onEnded { value in
+                        guard isTuningMode else { return }
+                        tuningGestureActive = false
+                        if value.translation.width.magnitude > 3 || value.translation.height.magnitude > 3 {
+                            canonicalLayoutService.commitDrag()
+                            canonicalLayoutService.flushSaves()
+                        } else {
+                            canonicalLayoutService.activeDragDelta = .zero
+                        }
+                    },
+                including: isTuningMode ? .all : .subviews
+            )
             .onAppear { lastZoom = zoomScale }
 
             if isTuningMode {
-                AlignmentToolbar()
-                    .padding(.top, 56)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .allowsHitTesting(true)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .zIndex(100)
+                VStack(spacing: 6) {
+                    AlignmentToolbar()
+                    TuningSelectionInfo()
+                }
+                .padding(.top, 56)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .allowsHitTesting(true)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .zIndex(100)
             }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { isTuningMode.toggle() }
+            } label: {
+                Image(systemName: isTuningMode ? "wrench.and.screwdriver.fill" : "wrench.and.screwdriver")
+                    .font(.system(size: 15))
+                    .foregroundStyle(isTuningMode ? Theme.waveHighlight : Color.secondary)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(isTuningMode ? 0.4 : 0.12), lineWidth: 1))
+            .shadow(color: .black.opacity(0.35), radius: 6, y: 2)
+            .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .zIndex(200)
         }
         .background(Theme.panelBackground)
         .environment(\.waveControlHighlight, Theme.waveHighlight)
@@ -157,6 +297,7 @@ struct WavePanelView: View {
         .environment(\.waveActiveGroup, selectedGroup)
         .environment(\.isTuningMode, isTuningMode)
         .environment(\.panelZoomScale, zoomScale)
+        .environment(\.waveUsesCanonicalLayout, true)
     }
 
     // MARK: - Header
@@ -165,12 +306,20 @@ struct WavePanelView: View {
         HStack(spacing: 20) {
             // Patch name prominent, synth model as small subtitle
             VStack(alignment: .leading, spacing: 2) {
-                Text((patch.name ?? "Untitled").uppercased())
-                    .font(.system(size: 28, weight: .black, design: .rounded))
+                Text(patch.name ?? "Untitled")
+                    .font(.system(size: 26, weight: .black, design: .rounded))
                     .foregroundStyle(Theme.waveHighlight)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
                 Text("WAVE")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundStyle(Color.secondary)
+                if let designer = patch.designer, !designer.isEmpty {
+                    Text(designer)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.secondary.opacity(0.8))
+                        .lineLimit(1)
+                }
             }
 
             Spacer()
@@ -221,6 +370,30 @@ struct WavePanelView: View {
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.12), lineWidth: 1))
 
+            if isTuningMode && LayoutOffsetService.shared.hasBackup {
+                Button {
+                    LayoutOffsetService.shared.restoreBackup()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.plain)
+                .help("Restore last backup of panel positions and styles")
+            }
+
+            if isTuningMode {
+                Button {
+                    LayoutOffsetService.shared.exportOverridesToClipboard()
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundStyle(Theme.waveHighlight)
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.plain)
+                .help("Copy layout overrides as source code")
+            }
+
             // Tuning wrench
             Button { isTuningMode.toggle() } label: {
                 Image(systemName: "wrench.adjustable")
@@ -235,7 +408,9 @@ struct WavePanelView: View {
     // MARK: - Row 1 Sections
 
     private var lfoSection: some View {
-        WavePanelSection(title: "LFO") {
+        WavePanelSection(title: "LFO", resetIDs: [
+            WaveParamID.delay.rawValue, WaveParamID.waveshape.rawValue, WaveParamID.rate.rawValue
+        ]) {
             HStack(spacing: 8) {
                 WaveKnobControl(patch: patch, id: .delay,     size: Theme.knobSizeSmall, labelOverride: "Delay")
                 WaveKnobControl(patch: patch, id: .waveshape, size: Theme.knobSizeSmall, labelOverride: "Shape")
@@ -245,7 +420,9 @@ struct WavePanelView: View {
     }
 
     private var modulationSection: some View {
-        WavePanelSection(title: "Modulation") {
+        WavePanelSection(title: "Modulation", resetIDs: [
+            WaveParamID.modWhl.rawValue, WaveParamID.env2Loud.rawValue, WaveParamID.env1Waves.rawValue
+        ]) {
             HStack(spacing: 8) {
                 WaveKnobControl(patch: patch, id: .modWhl,   size: Theme.knobSizeSmall, labelOverride: "Mod W")
                 WaveKnobControl(patch: patch, id: .env2Loud, size: Theme.knobSizeSmall, labelOverride: "E2→Vol")
@@ -254,21 +431,25 @@ struct WavePanelView: View {
         }
     }
 
-    private var wavesPitchSection: some View {
-        WavePanelSection(title: "Waves · Pitch Env") {
-            VStack(spacing: 10) {
-                // Wave table positions — the signature PPG params
-                HStack(spacing: 16) {
-                    WaveKnobControl(patch: patch, id: .wavesOsc, size: Theme.knobSizeMedium, labelOverride: "OSC")
-                    WaveKnobControl(patch: patch, id: .wavesSub, size: Theme.knobSizeMedium, labelOverride: "SUB")
-                }
-                panelDivider
-                // Env 3 — Pitch
-                HStack(spacing: 8) {
-                    WaveKnobControl(patch: patch, id: .attack3, size: Theme.knobSizeSmall, labelOverride: "Att")
-                    WaveKnobControl(patch: patch, id: .decay3,  size: Theme.knobSizeSmall, labelOverride: "Dec")
-                    WaveKnobControl(patch: patch, id: .env3Att, size: Theme.knobSizeSmall, labelOverride: "Amt")
-                }
+    private var wavesSection: some View {
+        WavePanelSection(title: "Waves", resetIDs: [
+            WaveParamID.wavesOsc.rawValue, WaveParamID.wavesSub.rawValue
+        ]) {
+            HStack(spacing: 16) {
+                WaveKnobControl(patch: patch, id: .wavesOsc, size: Theme.knobSizeMedium, labelOverride: "OSC")
+                WaveKnobControl(patch: patch, id: .wavesSub, size: Theme.knobSizeMedium, labelOverride: "SUB")
+            }
+        }
+    }
+
+    private var pitchEnvSection: some View {
+        WavePanelSection(title: "Pitch Env", resetIDs: [
+            WaveParamID.attack3.rawValue, WaveParamID.decay3.rawValue, WaveParamID.env3Att.rawValue
+        ]) {
+            HStack(spacing: 8) {
+                WaveKnobControl(patch: patch, id: .attack3, size: Theme.knobSizeSmall, labelOverride: "Att")
+                WaveKnobControl(patch: patch, id: .decay3,  size: Theme.knobSizeSmall, labelOverride: "Dec")
+                WaveKnobControl(patch: patch, id: .env3Att, size: Theme.knobSizeSmall, labelOverride: "Amt")
             }
         }
     }
@@ -287,14 +468,17 @@ struct WavePanelView: View {
     /// OBsixer-style filter: Freq + Res on top, full wave envelope row below.
     /// ENV1→VCF amount sits at the end of the envelope row as "Env Amt".
     private var filterWaveEnvSection: some View {
-        WavePanelSection(title: "Filter · Wave Env") {
+        WavePanelSection(title: "Filter · Wave Env", resetIDs: [
+            WaveParamID.vcfCutoff.rawValue, WaveParamID.vcfEmphasis.rawValue,
+            WaveParamID.a1.rawValue, WaveParamID.d1.rawValue, WaveParamID.s1.rawValue,
+            WaveParamID.r1.rawValue, WaveParamID.env1VCF.rawValue
+        ]) {
             VStack(spacing: 10) {
                 // Filter controls
                 HStack(spacing: 16) {
                     WaveKnobControl(patch: patch, id: .vcfCutoff,   size: Theme.knobSizeMedium, labelOverride: "Freq")
                     WaveKnobControl(patch: patch, id: .vcfEmphasis, size: Theme.knobSizeMedium, labelOverride: "Res")
                 }
-                panelDivider
                 // Wave Env (Env 1) + filter routing amount
                 HStack(spacing: 8) {
                     WaveKnobControl(patch: patch, id: .a1,       size: Theme.knobSizeSmall, labelOverride: "Att")
@@ -308,7 +492,9 @@ struct WavePanelView: View {
     }
 
     private var ampEnvSection: some View {
-        WavePanelSection(title: "Amp Env") {
+        WavePanelSection(title: "Amp Env", resetIDs: [
+            WaveParamID.a2.rawValue, WaveParamID.d2.rawValue, WaveParamID.s2.rawValue, WaveParamID.r2.rawValue
+        ]) {
             HStack(spacing: 8) {
                 WaveKnobControl(patch: patch, id: .a2, size: Theme.knobSizeSmall, labelOverride: "Att")
                 WaveKnobControl(patch: patch, id: .d2, size: Theme.knobSizeSmall, labelOverride: "Dec")
@@ -320,7 +506,12 @@ struct WavePanelView: View {
 
     /// All routing matrices — key, mod wheel, velocity, touch — using mini knobs.
     private var routingSection: some View {
-        WavePanelSection(title: "Routing") {
+        WavePanelSection(title: "Routing", resetIDs: [
+            WaveParamID.kw.rawValue, WaveParamID.kf.rawValue, WaveParamID.kl.rawValue,
+            WaveParamID.mw.rawValue, WaveParamID.mf.rawValue, WaveParamID.ml.rawValue,
+            WaveParamID.vf.rawValue, WaveParamID.vl.rawValue,
+            WaveParamID.tw.rawValue, WaveParamID.tf.rawValue, WaveParamID.tl.rawValue, WaveParamID.tm.rawValue
+        ]) {
             HStack(alignment: .top, spacing: 16) {
                 // Key tracking
                 VStack(alignment: .leading, spacing: 8) {
@@ -330,8 +521,6 @@ struct WavePanelView: View {
                     WaveKnobControl(patch: patch, id: .kl, size: Theme.knobSizeMini, labelOverride: "→Loud")
                 }
 
-                sectionDivider
-
                 // Mod wheel
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("Mod Wheel")
@@ -340,16 +529,12 @@ struct WavePanelView: View {
                     WaveLEDToggle(patch: patch, id: .ml, label: "→Loud")
                 }
 
-                sectionDivider
-
                 // Velocity
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("Velocity")
                     WaveKnobControl(patch: patch, id: .vf, size: Theme.knobSizeMini, labelOverride: "→Filt")
                     WaveKnobControl(patch: patch, id: .vl, size: Theme.knobSizeMini, labelOverride: "→Loud")
                 }
-
-                sectionDivider
 
                 // Touch / aftertouch
                 VStack(alignment: .leading, spacing: 8) {
@@ -365,7 +550,14 @@ struct WavePanelView: View {
 
     /// Oscillator config, bender, tuning, and voice semitone offsets.
     private var performanceSection: some View {
-        WavePanelSection(title: "Performance") {
+        WavePanelSection(title: "Performance", resetIDs: [
+            WaveParamID.uw.rawValue, WaveParamID.sw.rawValue,
+            WaveParamID.bd.rawValue, WaveParamID.bi.rawValue,
+            WaveParamID.detu.rawValue, WaveParamID.eo.rawValue,
+            WaveParamID.mo.rawValue, WaveParamID.ms.rawValue, WaveParamID.es.rawValue,
+            WaveParamID.semitV1.rawValue, WaveParamID.semitV2.rawValue, WaveParamID.semitV3.rawValue, WaveParamID.semitV4.rawValue,
+            WaveParamID.semitV5.rawValue, WaveParamID.semitV6.rawValue, WaveParamID.semitV7.rawValue, WaveParamID.semitV8.rawValue
+        ]) {
             HStack(alignment: .top, spacing: 16) {
                 // Oscillator config
                 VStack(alignment: .leading, spacing: 8) {
@@ -378,8 +570,6 @@ struct WavePanelView: View {
                                  label: "Sub Osc")
                 }
 
-                sectionDivider
-
                 // Bender
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("Bender")
@@ -388,8 +578,6 @@ struct WavePanelView: View {
                                  label: "Dest")
                     WaveKnobControl(patch: patch, id: .bi, size: Theme.knobSizeMini, labelOverride: "Int")
                 }
-
-                sectionDivider
 
                 // Tuning
                 VStack(alignment: .leading, spacing: 8) {
@@ -400,8 +588,6 @@ struct WavePanelView: View {
                     WaveLEDToggle(patch: patch, id: .ms, label: "M→Sub")
                     WaveLEDToggle(patch: patch, id: .es, label: "E3→Sub")
                 }
-
-                sectionDivider
 
                 // Voice semi offsets — 2×4 mini knob grid
                 VStack(alignment: .leading, spacing: 8) {
@@ -423,19 +609,6 @@ struct WavePanelView: View {
     }
 
     // MARK: - Helpers
-
-    private var panelDivider: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.07))
-            .frame(height: 1)
-    }
-
-    private var sectionDivider: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.07))
-            .frame(width: 1)
-            .padding(.vertical, 4)
-    }
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text.uppercased())
@@ -461,11 +634,18 @@ private extension View {
 
 struct WavePanelSection<Content: View>: View {
     let title: String
+    var resetIDs: [String] = []
     @ViewBuilder let content: () -> Content
 
     private let accent = Theme.xrAccentBlue
+    @Environment(\.isTuningMode) private var isTuningMode
+    @ObservedObject private var offsetService = LayoutOffsetService.shared
+    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @State private var currentNaturalSize: CGSize = .zero
 
     var body: some View {
+        let storedSize = canonicalLayoutService.size(for: title)
+
         VStack(alignment: .leading, spacing: 0) {
             // Title bar: solid accent left block, title text, accent fill to right edge
             HStack(spacing: 0) {
@@ -478,18 +658,153 @@ struct WavePanelSection<Content: View>: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
+                if isTuningMode && !resetIDs.isEmpty {
+                    Button {
+                        offsetService.resetIDs(resetIDs)
+                    } label: {
+                        Image(systemName: "arrow.counterclockwise")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color.orange.opacity(0.9))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Reset \(title) positions")
+                    .padding(.trailing, 6)
+                }
                 Rectangle()
                     .fill(accent)
                     .frame(maxWidth: .infinity, maxHeight: 14)
             }
             .fixedSize(horizontal: false, vertical: true)
 
-            content()
-                .padding(16)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Theme.xrSectionBackground)
+            ZStack(alignment: .bottomTrailing) {
+                content()
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                if isTuningMode {
+                    ZStack {
+                        WavePanelResizeHandleView(
+                            panelID: title,
+                            naturalSize: currentNaturalSize,
+                            layoutService: canonicalLayoutService
+                        )
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            .font(.system(size: 9))
+                            .foregroundStyle(accent.opacity(0.9))
+                            .allowsHitTesting(false)
+                    }
+                    .frame(width: 20, height: 20)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                    .padding(4)
+                    .help("Drag to resize. Double-click to reset.")
+                }
+            }
+            .if(storedSize != nil) { $0.frame(width: storedSize!.width, height: storedSize!.height) }
+            .background(
+                GeometryReader { geo in
+                    Theme.xrSectionBackground
+                        .onAppear {
+                            currentNaturalSize = geo.size
+                            canonicalLayoutService.seedSectionSizeIfNeeded(title, size: geo.size)
+                        }
+                        .onChange(of: geo.size) { _, size in
+                            currentNaturalSize = size
+                            canonicalLayoutService.seedSectionSizeIfNeeded(title, size: size)
+                        }
+                }
+            )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 2))
+        .if(!isTuningMode) { $0.clipShape(RoundedRectangle(cornerRadius: 2)) }
         .overlay(RoundedRectangle(cornerRadius: 2).stroke(accent.opacity(0.35), lineWidth: 1))
+    }
+}
+
+struct TuningSelectionInfo: View {
+    @ObservedObject private var service = LayoutOffsetService.shared
+    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @Environment(\.waveUsesCanonicalLayout) private var waveUsesCanonicalLayout
+
+    var body: some View {
+        let ids = Array(waveUsesCanonicalLayout ? canonicalLayoutService.selectedIDs : service.selectedIDs)
+        if ids.isEmpty { return AnyView(EmptyView()) }
+
+        return AnyView(
+            Group {
+                if ids.count == 1 {
+                    singleItemChip(id: ids[0])
+                } else {
+                    multiChip(count: ids.count)
+                }
+            }
+        )
+    }
+
+    private func singleItemChip(id: String) -> some View {
+        let descriptor = WaveParamID(rawValue: id).flatMap { WaveParameters.byID[$0] }
+        let offset = waveUsesCanonicalLayout
+            ? canonicalLayoutService.origin(for: id).map { CGSize(width: $0.x, height: $0.y) } ?? .zero
+            : service.offset(for: id)
+
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                if let d = descriptor {
+                    Text(d.displayName)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text(d.group.rawValue.uppercased())
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Theme.waveHighlight)
+                } else {
+                    Text(id)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.primary)
+                    Text("LAYOUT ITEM")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundStyle(Color.secondary)
+                }
+            }
+
+            if offset != .zero {
+                Divider().frame(height: 20)
+                Text("x \(Int(offset.width))  y \(Int(offset.height))")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(Color.secondary)
+            }
+
+            Divider().frame(height: 20)
+            Button("Reset") {
+                if waveUsesCanonicalLayout {
+                    canonicalLayoutService.resetControlPosition(id)
+                } else {
+                    service.resetOffset(id)
+                }
+                service.resetStyle(id)
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(Theme.waveHighlight)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.82))
+                .overlay(Capsule().strokeBorder(Theme.waveHighlight.opacity(0.35), lineWidth: 1))
+        )
+        .shadow(color: .black.opacity(0.5), radius: 4, x: 0, y: 2)
+    }
+
+    private func multiChip(count: Int) -> some View {
+        Text("\(count) items selected")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(Color.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(
+                Capsule()
+                    .fill(Color.black.opacity(0.75))
+                    .overlay(Capsule().strokeBorder(Theme.waveHighlight.opacity(0.25), lineWidth: 1))
+            )
     }
 }
