@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import AppKit
 
 struct WavePanelLayoutFile: Codable {
     struct Size: Codable {
@@ -158,6 +159,14 @@ final class WavePanelLayoutService: ObservableObject {
         saveSoon()
     }
 
+    func resetControlPositions(_ ids: [String]) {
+        var changed = false
+        for id in ids where controlOrigins.removeValue(forKey: id) != nil {
+            changed = true
+        }
+        if changed { saveSoon() }
+    }
+
     enum AlignmentEdge { case left, center, right, top, middle, bottom }
 
     func alignSelected(to edge: AlignmentEdge) {
@@ -213,6 +222,20 @@ final class WavePanelLayoutService: ObservableObject {
     func flushSaves() {
         saveWorkItem?.cancel()
         saveNow()
+    }
+
+    func exportToClipboard() {
+        let file = WavePanelLayoutFile(
+            sectionSizes: Dictionary(uniqueKeysWithValues: sectionSizes.map { ($0.key, WavePanelLayoutFile.Size($0.value)) }),
+            controlOrigins: Dictionary(uniqueKeysWithValues: controlOrigins.map { ($0.key, WavePanelLayoutFile.Point($0.value)) })
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(file),
+              let text = String(data: data, encoding: .utf8) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        print(text)
     }
 
     private func targetOrigin(

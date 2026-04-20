@@ -384,7 +384,7 @@ struct WavePanelView: View {
 
             if isTuningMode {
                 Button {
-                    LayoutOffsetService.shared.exportOverridesToClipboard()
+                    canonicalLayoutService.exportToClipboard()
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                         .foregroundStyle(Theme.waveHighlight)
@@ -660,6 +660,7 @@ struct WavePanelSection<Content: View>: View {
                     .padding(.vertical, 3)
                 if isTuningMode && !resetIDs.isEmpty {
                     Button {
+                        canonicalLayoutService.resetControlPositions(resetIDs)
                         offsetService.resetIDs(resetIDs)
                     } label: {
                         Image(systemName: "arrow.counterclockwise")

@@ -44,7 +44,11 @@ struct AlignmentToolbar: View {
             toolDivider()
             toolGroup {
                 toolButton("square.and.arrow.up", help: "Export Overrides to Clipboard", enabled: true) {
-                    layoutService.exportOverridesToClipboard()
+                    if waveUsesCanonicalLayout {
+                        canonicalLayoutService.exportToClipboard()
+                    } else {
+                        layoutService.exportOverridesToClipboard()
+                    }
                 }
                 toolButton("xmark.circle", help: "Clear Selection", enabled: hasSelection) {
                     if waveUsesCanonicalLayout {
