@@ -151,7 +151,14 @@ Plan for a dedicated Arp panel plus a fuller sequence editor.
 
 ## Critical Layout Rules
 
-*(None yet — will be populated as panel work begins)*
+- Detailed panel-editor notes now live in `PANEL_EDITOR_VIEW_UPGRADE_NOTES.md`.
+- Use a single canonical layout service for section frames, control frames, knob sizes, selection, alignment, distribution, export, and persistence.
+- Store section frames, not only section sizes. Dense synth panels need movable/resizable sections.
+- Give section selections prefixed IDs such as `panel:LFO` so panels and controls can share one selection model.
+- Align and size-match against the key selected object, using displayed frames during active drags.
+- Keep tuning mode developer-only: wrench, outlines, inspector popovers, resize handles, alignment toolbar, and export controls should not clutter normal editing.
+- Source-control stable layout defaults after tuning, while keeping user overrides layered above them.
+- Ignore repo-local Xcode derived-data folders (`.derived/`, `.deriveddata/`) so build/index artifacts do not pollute panel commits.
 
 ---
 
@@ -167,6 +174,17 @@ Plan for a dedicated Arp panel plus a fuller sequence editor.
 ---
 
 ## Session Log
+
+### Session 8 — 2026-04-23
+
+**Panel editor upgrades captured:**
+- Added the dedicated panel upgrade note: `PANEL_EDITOR_VIEW_UPGRADE_NOTES.md`
+- Documented the current Wave panel architecture for reuse in future editors
+- Captured A/B tab behavior, tuning mode, Tab selection, section drag/resize, control selection, alignment tools, size matching, panel gap tools, layout export, and source-default promotion
+- Updated the critical layout rules with the decisions that came out of the brWave panel tuning pass
+
+**Key takeaway:**
+- Future editors should start with the layout service, tuning controls, section frames, and export workflow early. Waiting until after the panel is visually dense makes alignment work much harder.
 
 ### Session 7 — 2026-04-04
 
