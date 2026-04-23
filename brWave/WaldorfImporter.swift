@@ -32,6 +32,48 @@ import UniformTypeIdentifiers
 
 enum WaldorfImporter {
 
+    /// Import one or more .fxp single-preset files.
+    /// Each FXP contains one group of floats. Group B is set equal to Group A on import
+    /// (no dual-group in a standalone FXP — user can diverge Group B afterwards).
+    @MainActor
+    static func importFXP(urls: [URL], into context: NSManagedObjectContext) {
+        var totalImported = 0
+
+        for url in urls {
+            guard let data = try? Data(contentsOf: url),
+                  let record = parseFXPRecord(from: data) else { continue }
+
+            // Single group — duplicate to A and B
+            let patchName = importName(record.name, sourceMarker: "3")
+            guard let payload = buildPayload(recordA: record, recordB: record, patchName: patchName) else { continue }
+
+            let patch = Patch(context: context)
+            patch.uuid            = UUID()
+            patch.dateCreated     = Date()
+            patch.dateModified    = Date()
+            patch.name            = patchName
+            patch.designer        = importDesigner(
+                source: "Waldorf PPG Wave 3.V",
+                fileName: url.lastPathComponent,
+                extra: "FXP import"
+            )
+            patch.bank            = -1
+            patch.program         = 0
+            patch.rawSysexPayload = Data(payload)
+            patch.patchValues     = valuesFromPayload(payload)
+            patch.category        = PatchCategory.classify(patchName: patchName).rawValue
+
+            // Each FXP imports as its own single-patch library
+            let libName = url.deletingPathExtension().lastPathComponent
+            let patchSet = PatchSet.findOrCreate(named: libName, in: context)
+            patchSet.modifiedAt = Date()
+            PatchSlot.make(position: 0, patch: patch, in: patchSet, ctx: context)
+            totalImported += 1
+        }
+
+        if totalImported > 0 { try? context.save() }
+    }
+
     /// Import .fxb files from the provided URLs.
     @MainActor
     static func importFXB(urls: [URL], into context: NSManagedObjectContext) {
@@ -55,18 +97,24 @@ enum WaldorfImporter {
                 let recA = records[n * 2]
                 let recB = records[n * 2 + 1]
 
-                guard let payload = buildPayload(recordA: recA, recordB: recB) else { continue }
+                let patchName = importName(recA.name, sourceMarker: "3")
+                guard let payload = buildPayload(recordA: recA, recordB: recB, patchName: patchName) else { continue }
 
                 let patch = Patch(context: context)
                 patch.uuid            = UUID()
                 patch.dateCreated     = Date()
                 patch.dateModified    = Date()
-                patch.name            = recA.name
+                patch.name            = patchName
+                patch.designer        = importDesigner(
+                    source: "Waldorf PPG Wave 3.V",
+                    fileName: url.lastPathComponent,
+                    extra: "FXB import"
+                )
                 patch.bank            = -1
                 patch.program         = Int16(n)
                 patch.rawSysexPayload = Data(payload)
                 patch.patchValues     = valuesFromPayload(payload)
-                patch.category        = PatchCategory.classify(patchName: recA.name).rawValue
+                patch.category        = PatchCategory.classify(patchName: patchName).rawValue
 
                 // Assign sequential slot positions (0-based within the library)
                 PatchSlot.make(position: n, patch: patch, in: patchSet, ctx: context)
@@ -85,6 +133,56 @@ enum WaldorfImporter {
 private struct FPChRecord {
     let name:   String          // up to 16 chars for Beh name field
     let floats: [Float32]       // 339 (2.V) or 340 (3.V) big-endian floats
+}
+
+// MARK: - FXP single-preset parser
+
+/// Parse a standalone .fxp file (CcnK outer wrapper + FPCh program chunk).
+///
+/// FXP layout (offsets from file start):
+///   [0]  CcnK
+///   [4]  byteSize
+///   [8]  FPCh  ← fxMagic
+///   [12] version
+///   [16] fxID "2901"
+///   [20] fxVersion
+///   [24] pchName (28 bytes)
+///   [52] chunkSize (UInt32 BE)
+///   [56] float data (340 × Float32 BE for 3.V, 339 for 2.V)
+///
+/// This differs from FBCh-embedded FPCh records: in those, FPCh sits at offset 0
+/// within the record (not 8), and has an extra 4-byte field between fxID and the name,
+/// shifting name/floats 4 bytes later (+20/+52 vs +24/+56 within the FPCh block).
+private func parseFXPRecord(from data: Data) -> FPChRecord? {
+    let bytes = [UInt8](data)
+    guard bytes.count >= 60 else { return nil }
+
+    // Validate CcnK + FPCh magic
+    let ccnk: [UInt8] = [0x43, 0x63, 0x6E, 0x4B]
+    let fpch: [UInt8] = [0x46, 0x50, 0x43, 0x68]
+    guard bytes[0...3].elementsEqual(ccnk) &&
+          bytes[8...11].elementsEqual(fpch) else { return nil }
+
+    // Name at offset 24, 28 bytes null-padded
+    let nameBytes = bytes[24..<52].prefix(while: { $0 != 0 && $0 >= 32 })
+    let name = (String(bytes: nameBytes, encoding: .ascii) ?? "Untitled")
+                   .trimmingCharacters(in: .whitespaces)
+
+    // Float array size at offset 52
+    let floatByteCount = readUInt32BE(bytes, at: 52)
+    let floatCount = Int(floatByteCount) / 4
+    guard floatCount >= 100,
+          56 + Int(floatByteCount) <= bytes.count else { return nil }
+
+    // Float data at offset 56
+    var floats = [Float32](repeating: 0, count: floatCount)
+    for f in 0..<floatCount {
+        let offset = 56 + f * 4
+        let bits = readUInt32BE(bytes, at: offset)
+        floats[f] = Float32(bitPattern: bits)
+    }
+
+    return FPChRecord(name: name.isEmpty ? "Untitled" : name, floats: floats)
 }
 
 // MARK: - FPCh Parsing
@@ -139,11 +237,11 @@ private func parseFPChRecords(from data: Data) -> [FPChRecord] {
 // MARK: - Payload Builder
 
 /// Builds a 121-byte Behringer Wave SysEx preset payload from an A+B FPCh pair.
-private func buildPayload(recordA: FPChRecord, recordB: FPChRecord) -> [UInt8]? {
+private func buildPayload(recordA: FPChRecord, recordB: FPChRecord, patchName: String) -> [UInt8]? {
     var payload = [UInt8](repeating: 0, count: 121)
 
     // Bytes 0–15: Name (16 ASCII chars, space-padded)
-    let nameBytes = Array(recordA.name.utf8.prefix(16))
+    let nameBytes = Array(patchName.utf8.prefix(16))
     for i in 0..<min(nameBytes.count, 16) {
         let c = nameBytes[i]
         payload[i] = (c >= 32 && c <= 126) ? c : 0x20
@@ -244,11 +342,11 @@ private func buildGroupBytes(from f: [Float32]) -> [UInt8] {
     // +21: VCF Emphasis (0–127) — float[20], confirmed mod14
     b[21] = lin(20, 127)
 
-    // +22: WAVES-OSC (0–127) — float[21], confirmed mod14
-    b[22] = lin(21, 127)
+    // +22: WAVES-OSC (0–63) — 64 wavetable cycles
+    b[22] = lin(21, 63)
 
-    // +23: WAVES-SUB (0–127) — float[22], confirmed mod14
-    b[23] = lin(22, 127)
+    // +23: WAVES-SUB (0–63) — 64 wavetable cycles
+    b[23] = lin(22, 63)
 
     // +24: ENV3 Attack (0–127) — float[8], confirmed mod15
     b[24] = lin(8, 127)
@@ -364,16 +462,24 @@ private func valuesFromPayload(_ payload: [UInt8]) -> WavePatchValues {
 
 // MARK: - Scaling helpers
 
-/// Clamps sentinel (-134217728) to 0.0, otherwise returns the float as Double.
+/// Clamps known sentinels, NaN/infinity, and absurd magnitudes to 0.0.
 private func cleanFloat(_ v: Float32) -> Double {
-    v < -1e6 ? 0.0 : Double(v)
+    guard v.isFinite else { return 0.0 }
+    let dv = Double(v)
+    guard dv > -1e6, dv < 1e6 else { return 0.0 }
+    return dv
 }
 
 /// Linear scale: round(cleanFloat(f[index]) × max), clamped to 0…max.
 private func scaleLinear(_ f: [Float32], index: Int, max: Int) -> Int {
     guard index < f.count else { return 0 }
     let v = cleanFloat(f[index])
-    return Swift.min(Swift.max(0, Int(round(v * Double(max)))), max)
+    let scaled = v * Double(max)
+    guard scaled.isFinite else { return 0 }
+    let rounded = scaled.rounded()
+    if rounded <= 0 { return 0 }
+    if rounded >= Double(max) { return max }
+    return Int(rounded)
 }
 
 // MARK: - Binary helpers

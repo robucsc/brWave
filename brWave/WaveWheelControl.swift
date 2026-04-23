@@ -12,6 +12,7 @@ struct WaveWheelControl: View {
     var title: String
     @Binding var value: Double
     var isPitch: Bool = false
+    var nudgeID: String? = nil
 
     @State private var dragStart: Double = 0
     @State private var displayValue: Double = 0
@@ -108,6 +109,7 @@ struct WaveWheelControl: View {
                 displayValue = newVal
             }
         }
+        .nudgeable(id: nudgeID ?? "wheel.\(title.lowercased())", controlType: .label)
     }
 
     private var valueText: String {

@@ -48,4 +48,29 @@ enum WaveSysExImporter {
             try? context.save()
         }
     }
+
+    /// Import raw Behringer SysEx bytes that may contain one or more concatenated messages.
+    @MainActor
+    static func importBytes(_ bytes: [UInt8], libraryName: String, into context: NSManagedObjectContext) {
+        let parsed = WaveSysExParser.parseSYXData(bytes)
+        guard !parsed.isEmpty else { return }
+
+        let patchSet = PatchSet.findOrCreate(named: libraryName, in: context)
+        patchSet.modifiedAt = Date()
+
+        for parsedPatch in parsed {
+            let patch = Patch(context: context)
+            patch.uuid        = UUID()
+            patch.dateCreated = Date()
+            patch.importParsed(parsedPatch)
+
+            if let bank = parsedPatch.bank, let prog = parsedPatch.program,
+               bank >= 0, prog >= 0 {
+                let position = bank * 100 + prog
+                PatchSlot.make(position: position, patch: patch, in: patchSet, ctx: context)
+            }
+        }
+
+        try? context.save()
+    }
 }

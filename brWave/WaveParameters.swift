@@ -336,11 +336,23 @@ struct WavePatchValues: Codable {
     }
 
     mutating func setValue(_ value: Int, for id: WaveParamID, group: WaveGroup) {
-        params[storageKey(id: id, group: group)] = value
+        let clamped: Int
+        if let range = WaveParameters.byID[id]?.range {
+            clamped = min(max(value, range.lowerBound), range.upperBound)
+        } else {
+            clamped = value
+        }
+        params[storageKey(id: id, group: group)] = clamped
     }
 
     private func storageKey(id: WaveParamID, group: WaveGroup) -> String {
         guard let d = WaveParameters.byID[id] else { return id.rawValue }
+        // WAVETB needs per-group editor state even though the current SysEx path still
+        // treats the hardware byte as shared. The UI and patch generators already rely
+        // on distinct A/B values here.
+        if id == .wavetb {
+            return "\(id.rawValue)_\(group.rawValue)"
+        }
         switch d.storage {
         case .shared:  return id.rawValue
         default:       return "\(id.rawValue)_\(group.rawValue)"

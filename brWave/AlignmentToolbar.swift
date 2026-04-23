@@ -9,53 +9,67 @@
 import SwiftUI
 
 struct AlignmentToolbar: View {
-    @ObservedObject var layoutService = LayoutOffsetService.shared
     @ObservedObject var canonicalLayoutService = WavePanelLayoutService.shared
-    @Environment(\.waveUsesCanonicalLayout) private var waveUsesCanonicalLayout
 
     private var hasSelection: Bool {
-        waveUsesCanonicalLayout ? !canonicalLayoutService.selectedIDs.isEmpty : !layoutService.selectedIDs.isEmpty
-    }
-    private var hasMultiple: Bool {
-        waveUsesCanonicalLayout ? canonicalLayoutService.selectedIDs.count > 1 : layoutService.selectedIDs.count > 1
+        !canonicalLayoutService.selectedIDs.isEmpty
     }
     private var hasThreePlus: Bool {
-        waveUsesCanonicalLayout ? canonicalLayoutService.selectedIDs.count > 2 : layoutService.selectedIDs.count > 2
+        canonicalLayoutService.selectedIDs.filter { !canonicalLayoutService.isPanelSelectionID($0) }.count > 2
+    }
+    private var hasMultipleAlignableItems: Bool {
+        canonicalLayoutService.selectedIDs.count > 1
+    }
+    private var hasMultipleResizableItems: Bool {
+        canonicalLayoutService.selectedIDs.count > 1
+    }
+    private var hasTwoSelectedPanels: Bool {
+        canonicalLayoutService.selectedIDs.filter { canonicalLayoutService.isPanelSelectionID($0) }.count == 2
     }
 
     var body: some View {
         HStack(spacing: 0) {
             toolGroup {
-                toolButton("align.horizontal.left",   help: "Align Left Edges",         enabled: hasMultiple)  { waveUsesCanonicalLayout ? canonicalLayoutService.alignSelected(to: .left) : layoutService.alignSelected(to: .left) }
-                toolButton("align.horizontal.center", help: "Align Horizontal Centers", enabled: hasMultiple)  { waveUsesCanonicalLayout ? canonicalLayoutService.alignSelected(to: .center) : layoutService.alignSelected(to: .center) }
-                toolButton("align.horizontal.right",  help: "Align Right Edges",        enabled: hasMultiple)  { waveUsesCanonicalLayout ? canonicalLayoutService.alignSelected(to: .right) : layoutService.alignSelected(to: .right) }
+                toolButton("align.horizontal.left",   help: "Align Left Edges",         enabled: hasMultipleAlignableItems)  { canonicalLayoutService.alignSelected(to: .left) }
+                toolButton("align.horizontal.center", help: "Align Horizontal Centers", enabled: hasMultipleAlignableItems)  { canonicalLayoutService.alignSelected(to: .center) }
+                toolButton("align.horizontal.right",  help: "Align Right Edges",        enabled: hasMultipleAlignableItems)  { canonicalLayoutService.alignSelected(to: .right) }
             }
             toolDivider()
             toolGroup {
-                toolButton("align.vertical.top",    help: "Align Top Edges",        enabled: hasMultiple)  { waveUsesCanonicalLayout ? canonicalLayoutService.alignSelected(to: .top) : layoutService.alignSelected(to: .top) }
-                toolButton("align.vertical.center", help: "Align Vertical Centers", enabled: hasMultiple)  { waveUsesCanonicalLayout ? canonicalLayoutService.alignSelected(to: .middle) : layoutService.alignSelected(to: .middle) }
-                toolButton("align.vertical.bottom", help: "Align Bottom Edges",     enabled: hasMultiple)  { waveUsesCanonicalLayout ? canonicalLayoutService.alignSelected(to: .bottom) : layoutService.alignSelected(to: .bottom) }
+                toolButton("align.vertical.top",    help: "Align Top Edges",        enabled: hasMultipleAlignableItems)  { canonicalLayoutService.alignSelected(to: .top) }
+                toolButton("align.vertical.center", help: "Align Vertical Centers", enabled: hasMultipleAlignableItems)  { canonicalLayoutService.alignSelected(to: .middle) }
+                toolButton("align.vertical.bottom", help: "Align Bottom Edges",     enabled: hasMultipleAlignableItems)  { canonicalLayoutService.alignSelected(to: .bottom) }
             }
             toolDivider()
             toolGroup {
-                toolButton("distribute.horizontal", help: "Distribute Horizontally", enabled: hasThreePlus) { waveUsesCanonicalLayout ? canonicalLayoutService.distributeSelected(horizontal: true) : layoutService.distributeSelected(horizontal: true) }
-                toolButton("distribute.vertical",   help: "Distribute Vertically",   enabled: hasThreePlus) { waveUsesCanonicalLayout ? canonicalLayoutService.distributeSelected(horizontal: false) : layoutService.distributeSelected(horizontal: false) }
+                toolButton("distribute.horizontal", help: "Distribute Horizontally", enabled: hasThreePlus) { canonicalLayoutService.distributeSelected(horizontal: true) }
+                toolButton("distribute.vertical",   help: "Distribute Vertically",   enabled: hasThreePlus) { canonicalLayoutService.distributeSelected(horizontal: false) }
+            }
+            toolDivider()
+            toolGroup {
+                toolButton("w.square", help: "Match Width", enabled: hasMultipleResizableItems) {
+                    canonicalLayoutService.matchSelectedSize(width: true, height: false)
+                }
+                toolButton("h.square", help: "Match Height", enabled: hasMultipleResizableItems) {
+                    canonicalLayoutService.matchSelectedSize(width: false, height: true)
+                }
+            }
+            toolDivider()
+            toolGroup {
+                toolButton("arrow.left.and.right.square", help: "Apply Standard Horizontal Gap", enabled: hasTwoSelectedPanels) {
+                    canonicalLayoutService.applyPanelGap(horizontal: true)
+                }
+                toolButton("arrow.up.and.down.square", help: "Apply Standard Vertical Gap", enabled: hasTwoSelectedPanels) {
+                    canonicalLayoutService.applyPanelGap(horizontal: false)
+                }
             }
             toolDivider()
             toolGroup {
                 toolButton("square.and.arrow.up", help: "Export Overrides to Clipboard", enabled: true) {
-                    if waveUsesCanonicalLayout {
-                        canonicalLayoutService.exportToClipboard()
-                    } else {
-                        layoutService.exportOverridesToClipboard()
-                    }
+                    canonicalLayoutService.exportToClipboard()
                 }
                 toolButton("xmark.circle", help: "Clear Selection", enabled: hasSelection) {
-                    if waveUsesCanonicalLayout {
-                        canonicalLayoutService.clearSelection()
-                    } else {
-                        layoutService.clearSelection()
-                    }
+                    canonicalLayoutService.clearSelection()
                 }
             }
         }

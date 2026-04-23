@@ -42,7 +42,7 @@ extension EnvironmentValues {
 // MARK: - WaveKnobControl
 
 /// Rotary knob for one Wave parameter.
-/// Outer ring = Group A value (cyan). Inner ring = Group B value (amber).
+/// Outer ring = Group A value (cyan). Inner ring = Group B value (white).
 /// Positions are fixed — switching A/B never swaps the rings, only adjusts which is bright.
 /// Scroll-wheel + vertical drag to adjust the active group.
 struct WaveKnobControl: View {
@@ -50,17 +50,20 @@ struct WaveKnobControl: View {
     let id: WaveParamID
     var size: CGFloat = Theme.knobSizeMedium
     var labelOverride: String? = nil
+    var valueTextOverride: String? = nil
+    var nudgeIDOverride: String? = nil
 
     @Environment(\.undoManager)           private var undoManager
     @Environment(\.isTuningMode)          private var isTuningMode
     @Environment(\.waveControlHighlight)  private var colorA   // cyan — Group A
-    @Environment(\.waveGroupBHighlight)   private var colorB   // amber — Group B
+    @Environment(\.waveGroupBHighlight)   private var colorB   // white — Group B
     @Environment(\.waveActiveGroup)       private var group
-    @ObservedObject private var offsetService = LayoutOffsetService.shared
+    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
 
     @State private var dragStartNorm: Double = 0
     @GestureState private var isDragging = false
     @State private var isUserDragging = false
+    @State private var isScrolling = false
     @State private var isHovering = false
     @State private var animatedValue: Double = 0  // tracks active group, animated
     @State private var isEditingValue = false
@@ -68,9 +71,14 @@ struct WaveKnobControl: View {
     @State private var shouldFocusEditor = false
 
     private var descriptor: WaveParamDescriptor? { WaveParameters.byID[id] }
-    private var currentValue: Int { patch.value(for: id, group: group) }
+    private var currentValue: Int {
+        let raw = patch.value(for: id, group: group)
+        guard let d = descriptor else { return raw }
+        return min(max(raw, d.range.lowerBound), d.range.upperBound)
+    }
 
     private var isPerGroup: Bool {
+        if id == .wavetb { return true }
         guard let d = descriptor else { return false }
         if case .perGroup = d.storage { return true }
         return false
@@ -83,27 +91,31 @@ struct WaveKnobControl: View {
         guard let d = descriptor else { return 0 }
         let lo = Double(d.range.lowerBound), hi = Double(d.range.upperBound)
         guard hi > lo else { return 0 }
-        return (Double(patch.value(for: id, group: g)) - lo) / (hi - lo)
+        let raw = patch.value(for: id, group: g)
+        let clamped = min(max(raw, d.range.lowerBound), d.range.upperBound)
+        return (Double(clamped) - lo) / (hi - lo)
     }
 
     private var normalizedValue: Double { group == .a ? normalizedA : normalizedB }
     private var label: String { labelOverride ?? descriptor?.shortName ?? id.rawValue }
-
+    private var nudgeID: String { nudgeIDOverride ?? id.rawValue }
     private var effectiveKnobSize: CGFloat {
-        let s = offsetService.style(for: id.rawValue).knobSize
-        return s == 0 ? size : s
+        canonicalLayoutService.knobSize(for: nudgeID) ?? size
     }
-    private var effectiveLabelSize: CGFloat {
-        let s = offsetService.style(for: id.rawValue).labelFontSize
-        return s == 0 ? 9 : s
-    }
-    private var effectiveValueSize: CGFloat {
-        let s = offsetService.style(for: id.rawValue).valueFontSize
-        return s == 0 ? 9 : s
-    }
+    private let effectiveLabelSize: CGFloat = 9
+    private let effectiveValueSize: CGFloat = 9
 
     // Active group colour for value readout
     private var activeColor: Color { group == .a ? colorA : colorB }
+    private var tuningSelectionIDs: Set<String> {
+        canonicalLayoutService.selectedIDs
+    }
+    private var tuningKeyObjectID: String? {
+        canonicalLayoutService.keyObjectID
+    }
+    private var isPersistentHighlight: Bool {
+        canonicalLayoutService.highlightedID == nudgeID
+    }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -115,7 +127,10 @@ struct WaveKnobControl: View {
 
             knobGraphic(size: effectiveKnobSize)
                 .gesture(dragGesture)
-                .modifier(WaveScrollModifier(onScroll: { delta in adjustValue(by: delta) }))
+                .modifier(WaveScrollModifier(
+                    onScroll: { delta in adjustValue(by: delta) },
+                    isScrolling: $isScrolling
+                ))
                 .onHover { isHovering = $0 }
                 .onAppear { animatedValue = normalizedValue }
                 .onChange(of: normalizedValue) { _, v in
@@ -128,30 +143,40 @@ struct WaveKnobControl: View {
 
             valueEditor
         }
-        .nudgeable(id: id.rawValue, controlType: .knob(size: effectiveKnobSize))
+        .contentShape(Rectangle())
+        .nudgeable(id: nudgeID, controlType: .knob(size: effectiveKnobSize))
     }
 
     // MARK: - Knob graphic
 
     private func knobGraphic(size s: CGFloat) -> some View {
-        let isHighlighted = offsetService.style(for: id.rawValue).highlighted
-        // Geometry: cap at s-18, giving ~9px ring for both arcs + gaps
-        let capS   = s - 18
-        let innerS = s - 10   // inner (B) ring: 2px gap from outer, 2px gap from cap
-        let arcW: CGFloat = 3 // equal stroke width for A and B
+        let outerArcW: CGFloat = 3.5
+        let innerArcW: CGFloat = 2.8
+        let capS = s - 20
+        let innerS = s - 14
+        let trenchColor = Color(white: 0.24)
 
         // Outer ring = Group A (always), inner ring = Group B (always)
         let aNorm = group == .a ? CGFloat(animatedValue) : CGFloat(normalizedA)
         let bNorm = group == .b ? CGFloat(animatedValue) : CGFloat(normalizedB)
-        let aOpacity: Double = group == .a ? 1.0 : 0.30
-        let bOpacity: Double = group == .b ? 1.0 : 0.30
+        let aOpacity: Double = group == .a ? 1.0 : 0.88
+        let bOpacity: Double = group == .b ? 1.0 : 0.96
 
         return ZStack {
+            // Persistent UI highlight: a soft blue halo around the knob body,
+            // not another value arc lane.
+            if !isTuningMode && isPersistentHighlight {
+                Circle()
+                    .strokeBorder(colorA.opacity(0.82), lineWidth: max(1.2, s * 0.02))
+                    .frame(width: capS + 10, height: capS + 10)
+                    .shadow(color: colorA.opacity(0.45), radius: 4, x: 0, y: 0)
+            }
+
             // Outer track — Group A lane
             Circle()
                 .trim(from: 0, to: 0.75)
-                .stroke(Color.black.opacity(0.50),
-                        style: StrokeStyle(lineWidth: arcW, lineCap: .butt))
+                .stroke(trenchColor.opacity(0.42),
+                        style: StrokeStyle(lineWidth: outerArcW, lineCap: .butt))
                 .rotationEffect(.degrees(135))
                 .frame(width: s, height: s)
 
@@ -159,8 +184,8 @@ struct WaveKnobControl: View {
             if isPerGroup {
                 Circle()
                     .trim(from: 0, to: 0.75)
-                    .stroke(Color.black.opacity(0.40),
-                            style: StrokeStyle(lineWidth: arcW, lineCap: .butt))
+                    .stroke(trenchColor.opacity(0.34),
+                            style: StrokeStyle(lineWidth: innerArcW, lineCap: .butt))
                     .rotationEffect(.degrees(135))
                     .frame(width: innerS, height: innerS)
             }
@@ -169,16 +194,22 @@ struct WaveKnobControl: View {
             Circle()
                 .trim(from: 0, to: aNorm * 0.75)
                 .stroke(colorA.opacity(aOpacity),
-                        style: StrokeStyle(lineWidth: arcW, lineCap: .round))
+                        style: StrokeStyle(lineWidth: outerArcW, lineCap: .round))
                 .rotationEffect(.degrees(135))
                 .frame(width: s, height: s)
 
-            // Group B arc — always inner ring, amber
+            // Group B arc — always inner ring, white
             if isPerGroup {
                 Circle()
                     .trim(from: 0, to: bNorm * 0.75)
+                    .stroke(Color.black.opacity(0.55),
+                            style: StrokeStyle(lineWidth: innerArcW + 1.0, lineCap: .round))
+                    .rotationEffect(.degrees(135))
+                    .frame(width: innerS, height: innerS)
+                Circle()
+                    .trim(from: 0, to: bNorm * 0.75)
                     .stroke(colorB.opacity(bOpacity),
-                            style: StrokeStyle(lineWidth: arcW, lineCap: .round))
+                            style: StrokeStyle(lineWidth: innerArcW, lineCap: .round))
                     .rotationEffect(.degrees(135))
                     .frame(width: innerS, height: innerS)
             }
@@ -191,29 +222,26 @@ struct WaveKnobControl: View {
                 ))
                 .overlay(
                     Circle().strokeBorder(
-                        isHighlighted
-                            ? AnyShapeStyle(activeColor)
-                            : AnyShapeStyle(LinearGradient(
-                                colors: [Color(white: 0.3), Color(white: 0.05)],
-                                startPoint: .topLeading, endPoint: .bottomTrailing
-                              )),
-                        lineWidth: isHighlighted ? 1.5 : 1
+                        LinearGradient(
+                            colors: [Color(white: 0.3), Color(white: 0.05)],
+                            startPoint: .topLeading, endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
                     )
                 )
                 .frame(width: capS, height: capS)
-                .shadow(color: .black.opacity(0.6), radius: 4, x: 0, y: 2)
+                .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 2)
                 .overlay(
                     Capsule()
-                        .fill(activeColor)
-                        .frame(width: 2, height: capS * 0.28)
-                        .offset(y: -capS * 0.22)
+                        .fill(activeColor.opacity(0.95))
+                        .frame(width: max(1.75, s * 0.035), height: capS * 0.35)
+                        .offset(y: -capS * 0.24)
                         .rotationEffect(.degrees(animatedValue * 270 - 135))
-                        .shadow(color: activeColor.opacity(0.5), radius: 2)
                 )
 
             // Tuning mode selection ring
-            if isTuningMode && offsetService.selectedIDs.contains(id.rawValue) {
-                let isKey = offsetService.keyObjectID == id.rawValue
+            if isTuningMode && tuningSelectionIDs.contains(id.rawValue) {
+                let isKey = tuningKeyObjectID == id.rawValue
                 Circle()
                     .strokeBorder(activeColor.opacity(isKey ? 1.0 : 0.55),
                                   lineWidth: isKey ? 2.5 : 1.5)
@@ -256,12 +284,20 @@ struct WaveKnobControl: View {
         let lo = Double(d.range.lowerBound), hi = Double(d.range.upperBound)
         let raw = Int(round(lo + clamped * (hi - lo)))
         patch.setValue(raw, for: id, group: group)
+        MIDIController.shared.sendParameterChange(id: id, value: raw, group: group)
         animatedValue = clamped
     }
 
     @ViewBuilder
     private var valueEditor: some View {
-        if isEditingValue {
+        if let valueTextOverride {
+            Text(valueTextOverride)
+                .font(.system(size: effectiveValueSize, weight: .black, design: .monospaced))
+                .foregroundStyle(activeColor)
+                .frame(minWidth: max(42, effectiveKnobSize + 10), minHeight: 18)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+        } else if isEditingValue {
             WaveInlineNumberTextField(
                 text: $editingText,
                 shouldFocus: $shouldFocusEditor,
@@ -274,6 +310,7 @@ struct WaveKnobControl: View {
             Text("\(currentValue)")
                 .font(.system(size: effectiveValueSize, weight: .black, design: .monospaced))
                 .foregroundStyle(activeColor)
+                .frame(minWidth: max(42, effectiveKnobSize - 12), minHeight: 18)
                 .lineLimit(1)
                 .contentShape(Rectangle())
                 .onTapGesture(count: 2) { beginValueEdit() }
@@ -298,6 +335,7 @@ struct WaveKnobControl: View {
         let hi = Double(d.range.upperBound)
         let normalized = hi > lo ? (Double(raw) - lo) / (hi - lo) : 0
         patch.setValue(raw, for: id, group: group)
+        MIDIController.shared.sendParameterChange(id: id, value: raw, group: group)
         animatedValue = normalized
         isEditingValue = false
         shouldFocusEditor = false
@@ -608,12 +646,25 @@ struct WaveMenuPicker: View {
 
 struct WaveScrollModifier: ViewModifier {
     let onScroll: (Double) -> Void
+    var isScrolling: Binding<Bool>?
     @State private var isHovering = false
+    @State private var scrollEndTask: DispatchWorkItem?
 
     func body(content: Content) -> some View {
         content
             .onHover { isHovering = $0 }
-            .background(WaveScrollMonitor(isHovering: $isHovering, onScroll: onScroll))
+            .background(
+                WaveScrollMonitor(isHovering: $isHovering, onScroll: { delta in
+                    if let isScrolling {
+                        isScrolling.wrappedValue = true
+                        scrollEndTask?.cancel()
+                        let task = DispatchWorkItem { isScrolling.wrappedValue = false }
+                        scrollEndTask = task
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: task)
+                    }
+                    onScroll(delta)
+                })
+            )
     }
 }
 
@@ -622,7 +673,7 @@ struct WaveScrollMonitor: NSViewRepresentable {
     let onScroll: (Double) -> Void
 
     func makeNSView(context: Context) -> NSView {
-        let view = NSView()
+        let view = PassthroughView()
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) {
             [weak coordinator = context.coordinator] event in
             guard let coordinator else { return event }
@@ -651,5 +702,73 @@ struct WaveScrollMonitor: NSViewRepresentable {
         var parent: WaveScrollMonitor
         var monitor: Any?
         init(parent: WaveScrollMonitor) { self.parent = parent }
+    }
+
+    final class PassthroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+}
+
+struct WaveKnobDragCapture: NSViewRepresentable {
+    let onBegin: () -> Void
+    let onDrag: (CGFloat) -> Void
+    let onEnd: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onBegin: onBegin, onDrag: onDrag, onEnd: onEnd)
+    }
+
+    func makeNSView(context: Context) -> DragView {
+        let view = DragView()
+        view.coordinator = context.coordinator
+        return view
+    }
+
+    func updateNSView(_ nsView: DragView, context: Context) {
+        nsView.coordinator = context.coordinator
+    }
+
+    final class Coordinator {
+        let onBegin: () -> Void
+        let onDrag: (CGFloat) -> Void
+        let onEnd: () -> Void
+
+        init(onBegin: @escaping () -> Void, onDrag: @escaping (CGFloat) -> Void, onEnd: @escaping () -> Void) {
+            self.onBegin = onBegin
+            self.onDrag = onDrag
+            self.onEnd = onEnd
+        }
+    }
+
+    final class DragView: NSView {
+        var coordinator: Coordinator?
+        private var startPoint: NSPoint = .zero
+        private var dragging = false
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            self
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            dragging = true
+            startPoint = convert(event.locationInWindow, from: nil)
+            coordinator?.onBegin()
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard dragging else { return }
+            let point = convert(event.locationInWindow, from: nil)
+            coordinator?.onDrag(point.y - startPoint.y)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            guard dragging else { return }
+            dragging = false
+            coordinator?.onEnd()
+        }
     }
 }

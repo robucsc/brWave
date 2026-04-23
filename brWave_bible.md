@@ -106,6 +106,13 @@ Every Wave preset has two full sounds (Group A + Group B). **Decision: A/B tab t
 
 **Diff arc concept**: knobs in Group A view show a secondary (dimmer) arc indicating the Group B value for that parameter. This gives an instant visual diff without switching views. Implement as an optional second arc in `WaveControls.swift` — primary arc = active group, ghost arc = inactive group. Color TBD (probably dimmer version of the highlight color, or a neutral grey).
 
+**Incoming MIDI group select**: the hardware sends Group Select as plain Control Change `CC 31`, not NRPN and not a SysEx offset. Values observed and documented in the Wave manual:
+- `CC 31 = 0`: edit Group A
+- `CC 31 = 1`: edit Group B
+- `CC 31 = 2`: edit Group A+B together
+
+When `CC 31 = 2`, incoming panel-control CCs should update both stored group values. Do not infer A/B behavior from the panel UI toggle alone; the synth has its own live edit target.
+
 ### Bank/Program Layout
 - 2 banks × 100 programs = 200 slots
 - Bank 0 = Behringer sounds, Bank 1 = classic PPG Wave programs
@@ -122,6 +129,23 @@ Bn 62 ParNum   (CC98, 0–46)
 Bn 06 Value    (CC6, 0–127)
 ```
 No CC38 (LSB data) unlike OB-6.
+
+### Arp / Sequencer Plan
+Plan for a dedicated Arp panel plus a fuller sequence editor.
+
+- The Arp panel should cover the Wave's live arp/seq controls: state, mode, clock source/rate, gate, division, tempo, metronome, overdub, and key transpose.
+- Match the SynthTribe parameter breakdown for the Arp panel:
+  - Mode A: Sequencer, Arpeggiator 1, Arpeggiator 2
+  - Mode B: Up, Down, Up & Down, Random, Moving
+  - Clock Source: Internal, DIN MIDI, USB MIDI, Analog Trigger
+  - Clock Rate: 1 ppqn, 2 ppqn, 24 ppqn, 48 ppqn
+  - Clock Division: 1/4 Note, 1/8 Note, 1/16 Note, 1/32 Note, 1/4 Note Triplet, 1/8 Note Triplet, 1/16 Note Triplet
+  - Gate, Tempo, Metronome, Overdub, and Key Transpose
+- The brWave sequencer should be its own design: 64 steps, with transposition based on incoming MIDI note. OBsixer can donate proven interaction mechanics, but it is not the design target.
+- Do not assume the Wave sequence payload conforms cleanly to the OBsixer model. Retrieved Wave sequences may need to be shown in a native/raw step-seq mode first.
+- If we add an OBsixer-style editor, treat it as a conformed/editor mode with explicit conversion rules, not as the only representation.
+- Preserve the raw Wave sequence data when possible so importing a sequence never silently loses hardware-specific behavior.
+- Hardware sequence storage appears to be one sequence per patch. Model retrieved sequence data as patch-attached first; any larger sequence browser/library should be an app-side convenience that can write into the selected patch's sequence.
 
 ---
 
@@ -303,7 +327,7 @@ No CC38 (LSB data) unlike OB-6.
 - Successfully completed infrastructure port from OBsixer.
 - Verified Behringer Wave `.syx` patch import pipeline and `WaveSysExParser` correctness based on the 121-byte specification.
 - Successfully extracted the original vintage PPG wavetables from ROM dumps (`docs/PPG Wave 2.3 version v6/w23_64.bin` through `w23_6e1.bin`)! Wrote a Python script that perfectly interpolates the "missing" wave slots logic found in the hardware.
-- Exported the wavetables into `PPGWavetables.swift` as a static `[30 tables][64 slots][128 samples]` `Int8` matrix. The audio engine/UI must mirror/invert these bytes for full 256-sample playback (standard PPG half-wave storage behavior).
+- Exported the factory wavetable set into `WaveTables.swift` as a static `[30 tables][64 waves][128 samples]` `Int8` matrix. These entries are already complete 128-sample waves for editor/display use.
 - Discovered that legacy Hermann Seib V8.x patches (`factory23.syx`) are 10,205 bytes and lack public parameter maps online. Decryption is blocked until the V8 manual is located.
 - Avoided the block by writing `Patch+Generation.swift`, which outputs functionally valid 121-byte Behringer Wave patches categorized by keywords (Bass, Lead, Pad, etc.) so UI development can proceed immediately without vintage patches.
 

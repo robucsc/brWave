@@ -242,9 +242,7 @@ struct PatchInspectorView: View {
     }
 
     private func wavetableLabel(_ n: Int) -> String {
-        if n <= 30 { return "(Factory)" }
-        if n <= 63 { return "(User TR)" }
-        return "(User WT)"
+        WaveTables.slotDisplayName(for: n)
     }
 
     private func commitName() {

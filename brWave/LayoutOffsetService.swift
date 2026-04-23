@@ -89,8 +89,40 @@ class LayoutOffsetService: ObservableObject {
     func resetStyle(_ id: String) { styles.removeValue(forKey: id); saveStyles() }
 
     func resetAll() {
+        if let data = try? JSONEncoder().encode(offsets) {
+            UserDefaults.standard.set(data, forKey: saveKey + ".backup")
+        }
+        if let data = try? JSONEncoder().encode(styles) {
+            UserDefaults.standard.set(data, forKey: styleKey + ".backup")
+        }
         offsets.removeAll(); styles.removeAll()
         saveOffsets(); saveStyles()
+    }
+
+    func restoreBackup() {
+        if let data = UserDefaults.standard.data(forKey: saveKey + ".backup"),
+           let saved = try? JSONDecoder().decode([String: CGSize].self, from: data) {
+            offsets = saved
+            saveOffsets()
+        }
+        if let data = UserDefaults.standard.data(forKey: styleKey + ".backup"),
+           let saved = try? JSONDecoder().decode([String: NudgeStyle].self, from: data) {
+            styles = saved
+            saveStyles()
+        }
+    }
+
+    var hasBackup: Bool {
+        UserDefaults.standard.data(forKey: saveKey + ".backup") != nil
+    }
+
+    func resetIDs(_ ids: [String]) {
+        for id in ids {
+            offsets.removeValue(forKey: id)
+            styles.removeValue(forKey: id)
+        }
+        saveOffsets()
+        saveStyles()
     }
 
     // MARK: - Registry
@@ -255,9 +287,10 @@ class LayoutOffsetService: ObservableObject {
         }
     }
     private func loadOffsets() {
+        offsets = LayoutDefaults.offsets
         if let data = UserDefaults.standard.data(forKey: saveKey),
            let decoded = try? JSONDecoder().decode([String: CGSize].self, from: data) {
-            offsets = decoded
+            offsets.merge(decoded) { _, override in override }
         }
     }
     private func saveStyles() {
@@ -266,58 +299,52 @@ class LayoutOffsetService: ObservableObject {
         }
     }
     private func loadStyles() {
+        styles = LayoutDefaults.styles
         if let data = UserDefaults.standard.data(forKey: styleKey),
            let decoded = try? JSONDecoder().decode([String: NudgeStyle].self, from: data) {
-            styles = decoded
+            styles.merge(decoded) { _, override in override }
         }
     }
 
     // MARK: - Export overrides → clipboard
 
     func exportOverridesToClipboard() {
-        var lines: [String] = ["=== brWave Layout Overrides – \(formattedDate()) ===", ""]
+        let offsetList = offsets.filter { $0.value != .zero }.sorted { $0.key < $1.key }
+        let styleList  = styles.filter { s in
+            s.value.knobSize > 0 || s.value.labelFontSize > 0 ||
+            s.value.valueFontSize > 0 || s.value.highlighted
+        }.sorted { $0.key < $1.key }
 
-        let knobSizes:  [(String, CGFloat)] = styles.compactMap { id, s in s.knobSize      > 0 ? (id, s.knobSize)      : nil }.sorted { $0.0 < $1.0 }
-        let labelFonts: [(String, CGFloat)] = styles.compactMap { id, s in s.labelFontSize > 0 ? (id, s.labelFontSize) : nil }.sorted { $0.0 < $1.0 }
-        let valueFonts: [(String, CGFloat)] = styles.compactMap { id, s in s.valueFontSize > 0 ? (id, s.valueFontSize) : nil }.sorted { $0.0 < $1.0 }
-        let offsetList: [(String, CGSize)]  = offsets.filter { $0.value != .zero }.sorted { $0.key < $1.key }
-
-        if !knobSizes.isEmpty {
-            lines.append("-- Knob size overrides --")
-            for (id, sz) in knobSizes { lines.append("  \(id): \(knobSizeName(sz))  (\(Int(sz))px)") }
-            lines.append("")
+        var lines: [String] = [
+            "// Generated \(formattedDate()) — paste into LayoutDefaults.swift",
+            "// Then commit to git. Reset will no longer affect these.",
+            "",
+            "enum LayoutDefaults {",
+            "    static let offsets: [String: CGSize] = ["
+        ]
+        for (id, off) in offsetList {
+            lines.append("        \"\(id)\": CGSize(width: \(Int(off.width)), height: \(Int(off.height))),")
         }
-        if !labelFonts.isEmpty {
-            lines.append("-- Label font overrides --")
-            for (id, sz) in labelFonts { lines.append("  \(id): labelFontSize: \(Int(sz))pt") }
-            lines.append("")
+        if offsetList.isEmpty { lines.append("        // none") }
+        lines.append("    ]")
+        lines.append("")
+        lines.append("    static let styles: [String: NudgeStyle] = [")
+        for (id, s) in styleList {
+            var fields: [String] = []
+            if s.knobSize > 0 { fields.append("knobSize: \(Int(s.knobSize))") }
+            if s.labelFontSize > 0 { fields.append("labelFontSize: \(Int(s.labelFontSize))") }
+            if s.valueFontSize > 0 { fields.append("valueFontSize: \(Int(s.valueFontSize))") }
+            if s.highlighted { fields.append("highlighted: true") }
+            lines.append("        \"\(id)\": NudgeStyle(\(fields.joined(separator: ", "))),")
         }
-        if !valueFonts.isEmpty {
-            lines.append("-- Value font overrides --")
-            for (id, sz) in valueFonts { lines.append("  \(id): valueFontSize: \(Int(sz))pt") }
-            lines.append("")
-        }
-        if !offsetList.isEmpty {
-            lines.append("-- Position offsets --")
-            for (id, off) in offsetList { lines.append("  \(id): x \(Int(off.width))  y \(Int(off.height))") }
-            lines.append("")
-        }
-        if lines.count == 2 { lines.append("(no overrides active)") }
+        if styleList.isEmpty { lines.append("        // none") }
+        lines.append("    ]")
+        lines.append("}")
 
         let text = lines.joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         print(text)
-    }
-
-    private func knobSizeName(_ size: CGFloat) -> String {
-        switch size {
-        case Theme.knobSizeMini:   return "Theme.knobSizeMini"
-        case Theme.knobSizeSmall:  return "Theme.knobSizeSmall"
-        case Theme.knobSizeMedium: return "Theme.knobSizeMedium"
-        case Theme.knobSizeLarge:  return "Theme.knobSizeLarge"
-        default:                   return "\(Int(size))px"
-        }
     }
 
     private func formattedDate() -> String {

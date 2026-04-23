@@ -15,8 +15,8 @@ struct Theme {
     static let panelBackground   = Color(red: 0.05, green: 0.05, blue: 0.06)
     /// App chrome background
     static let surfaceBackground = Color(red: 0.11, green: 0.11, blue: 0.14)
-    /// XR section header background (Dark Slate/Teal)
-    static let xrHeaderBackground = Color(red: 0.12, green: 0.20, blue: 0.24)
+    /// Section/header blue matched to the requested hardware-style title strip.
+    static let xrHeaderBackground = Color(red: 56.0 / 255.0, green: 114.0 / 255.0, blue: 214.0 / 255.0)
     /// XR section content background (Near Black)
     static let xrSectionBackground = Color(red: 0.07, green: 0.07, blue: 0.07)
     /// Banks/librarian grid background
@@ -28,14 +28,14 @@ struct Theme {
 
     // MARK: - Foreground & Accents
 
-    /// Group A arc colour — high-contrast cyan
-    static let waveHighlight     = Color(red: 0.0, green: 0.85, blue: 1.0)
-    /// Group B arc colour — warm amber (complementary to cyan)
-    static let waveGroupBHighlight = Color(red: 1.0, green: 0.58, blue: 0.08)
+    /// Group A arc colour — clearer electric blue, less teal so A/B differences stay readable.
+    static let waveHighlight     = Color(red: 0.16, green: 0.80, blue: 1.0)
+    /// Group B arc colour — cool white with a touch of blue so it stays visible against the dark panel.
+    static let waveGroupBHighlight = Color(red: 0.90, green: 0.95, blue: 1.0)
     /// Phosphor green for active readouts/values
     static let waveValueText     = Color(red: 0.10, green: 0.95, blue: 0.30)
-    /// Sequential Blue for section accents and borders (XR style)
-    static let xrAccentBlue      = Color(red: 0.18, green: 0.28, blue: 0.65)
+    /// Accent blue kept in the same family as the requested title-strip blue.
+    static let xrAccentBlue      = Color(red: 56.0 / 255.0, green: 114.0 / 255.0, blue: 214.0 / 255.0)
     
     /// Hardware red for LEDs
     static let waveLED           = Color(red: 0.90, green: 0.18, blue: 0.12)
@@ -45,9 +45,9 @@ struct Theme {
     // MARK: - Knob Sizes
 
     static let knobSizeLarge:  CGFloat = 80
-    static let knobSizeMedium: CGFloat = 68
-    static let knobSizeSmall:  CGFloat = 58
-    static let knobSizeMini:   CGFloat = 42
+    static let knobSizeMedium: CGFloat = 70
+    static let knobSizeSmall:  CGFloat = 60
+    static let knobSizeMini:   CGFloat = 40
 }
 
 // MARK: - Conditional modifier helper

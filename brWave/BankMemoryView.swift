@@ -496,11 +496,7 @@ struct BankMemoryView: View {
                 guard nextFree < 200 else { break }
 
                 let copy             = Patch(context: context)
-                copy.uuid            = UUID()
-                copy.name            = (src.name ?? "Untitled") + " (copy)"
-                copy.designer        = src.designer
-                copy.rawSysexPayload = src.rawSysexPayload
-                copy.dateCreated     = Date()
+                copy.copyStoredState(from: src, nameOverride: (src.name ?? "Untitled") + " (copy)")
                 PatchSlot.make(position: nextFree, patch: copy, in: lib, ctx: context)
                 newPositions.append(nextFree)
                 nextFree += 1
@@ -521,16 +517,10 @@ struct BankMemoryView: View {
         let existingSlot = library.slotsArray.first { Int($0.position) == position }
 
         if let slot = existingSlot, let dest = slot.patch {
-            dest.name            = src.name
-            dest.designer        = src.designer
-            dest.rawSysexPayload = src.rawSysexPayload
+            dest.copyStoredState(from: src)
         } else {
             let copy             = Patch(context: ctx)
-            copy.uuid            = UUID()
-            copy.name            = src.name
-            copy.designer        = src.designer
-            copy.rawSysexPayload = src.rawSysexPayload
-            copy.dateCreated     = Date()
+            copy.copyStoredState(from: src)
             if let slot = existingSlot { slot.patch = copy }
             else { PatchSlot.make(position: position, patch: copy, in: library, ctx: ctx) }
         }

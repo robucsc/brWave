@@ -76,23 +76,20 @@ enum NudgeControlType {
 struct NudgeControlInspector: View {
     let id:          String
     let controlType: NudgeControlType?
-    @ObservedObject var offsetService: LayoutOffsetService
     @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
     @Environment(\.panelZoomScale) var zoom
-    @Environment(\.waveUsesCanonicalLayout) private var waveUsesCanonicalLayout
-
-    private var nudgeStyle: NudgeStyle { offsetService.style(for: id) }
-
-    private func effectiveDisplay(_ declared: CGFloat) -> String {
-        let effective = declared * zoom
-        return zoom == 1.0
-            ? "\(Int(declared))pt"
-            : "\(Int(declared))pt → \(String(format: "%.1f", effective))pt"
-    }
-
-    private func labelDisplay(_ size: CGFloat) -> String {
-        size == 0 ? "Default" : effectiveDisplay(size)
-    }
+    @State private var originXText = ""
+    @State private var originYText = ""
+    @State private var widthText = ""
+    @State private var heightText = ""
+    @State private var knobSizeText = ""
+    private let knobVisualInset: CGFloat = 12
+    private let knobSizePresets: [(label: String, size: CGFloat)] = [
+        ("Mini", Theme.knobSizeMini),
+        ("Small", Theme.knobSizeSmall),
+        ("Medium", Theme.knobSizeMedium),
+        ("Large", Theme.knobSizeLarge)
+    ]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -108,9 +105,12 @@ struct NudgeControlInspector: View {
                         Label(ct.displayName, systemImage: iconName(for: ct))
                             .font(.system(size: 11, weight: .semibold))
                         if let declared = ct.knobSize {
-                            let active = nudgeStyle.knobSize == 0 ? declared : nudgeStyle.knobSize
-                            let eff = active * zoom
-                            Text(zoom == 1.0 ? "\(Int(active))px" : "\(Int(active))px → \(String(format: "%.0f", eff))px")
+                            let displayed = displayedKnobSize(fromStored: declared)
+                            Text(
+                                zoom == 1.0
+                                    ? "\(Int(displayed))px"
+                                    : "\(Int(displayed))px → \(String(format: "%.0f", displayed * zoom))px"
+                            )
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary)
                                 .padding(.horizontal, 5).padding(.vertical, 2)
@@ -129,95 +129,103 @@ struct NudgeControlInspector: View {
 
             Divider()
 
-            // Knob size
-            if controlType?.knobSize != nil {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("KNOB SIZE")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundColor(.secondary)
-                    Picker("", selection: Binding(
-                        get: { nudgeStyle.knobSize == 0 ? (controlType?.knobSize ?? Theme.knobSizeSmall) : nudgeStyle.knobSize },
-                        set: { offsetService.setKnobSize(id, size: $0) }
-                    )) {
-                        Text("Mini (\(Int(Theme.knobSizeMini)))")  .tag(Theme.knobSizeMini)
-                        Text("Small (\(Int(Theme.knobSizeSmall)))").tag(Theme.knobSizeSmall)
-                        Text("Medium (\(Int(Theme.knobSizeMedium)))").tag(Theme.knobSizeMedium)
-                        Text("Large (\(Int(Theme.knobSizeLarge)))") .tag(Theme.knobSizeLarge)
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                }
-            }
-
-            // Label font
-            VStack(alignment: .leading, spacing: 6) {
-                Text("LABEL FONT")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(.secondary)
-                HStack(spacing: 8) {
-                    Text(labelDisplay(nudgeStyle.labelFontSize))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .frame(width: 80, alignment: .leading)
-                    Stepper("", value: Binding(
-                        get: { nudgeStyle.labelFontSize == 0 ? 10 : nudgeStyle.labelFontSize },
-                        set: { offsetService.setLabelFontSize(id, size: $0) }
-                    ), in: 7...20, step: 1)
-                    .labelsHidden()
-                    Button("↺") { offsetService.setLabelFontSize(id, size: 0) }
-                        .buttonStyle(.plain).foregroundColor(.secondary)
-                        .help("Reset to theme default")
-                }
-            }
-
-            // Value font
-            VStack(alignment: .leading, spacing: 6) {
-                Text("VALUE FONT")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(.secondary)
-                HStack(spacing: 8) {
-                    Text(labelDisplay(nudgeStyle.valueFontSize))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .frame(width: 80, alignment: .leading)
-                    Stepper("", value: Binding(
-                        get: { nudgeStyle.valueFontSize == 0 ? 10 : nudgeStyle.valueFontSize },
-                        set: { offsetService.setValueFontSize(id, size: $0) }
-                    ), in: 7...20, step: 1)
-                    .labelsHidden()
-                    Button("↺") { offsetService.setValueFontSize(id, size: 0) }
-                        .buttonStyle(.plain).foregroundColor(.secondary)
-                        .help("Reset to theme default")
-                }
-            }
-
-            Divider()
-
-            let offset = waveUsesCanonicalLayout
-                ? canonicalLayoutService.origin(for: id).map { CGSize(width: $0.x, height: $0.y) } ?? .zero
-                : offsetService.offset(for: id)
-            if offset != .zero {
+            let origin = canonicalLayoutService.origin(for: id) ?? .zero
+            let frame = canonicalLayoutService.frame(for: id) ?? .zero
+            let knobSize = canonicalLayoutService.knobSize(for: id) ?? controlType?.knobSize
+            if origin != .zero {
                 HStack(spacing: 12) {
-                    Text(waveUsesCanonicalLayout ? "ORIGIN" : "OFFSET")
+                    Text("ORIGIN")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .foregroundColor(.secondary)
-                    Text("x \(Int(offset.width))  y \(Int(offset.height))")
+                    Text("x \(Int(origin.x))  y \(Int(origin.y))")
                         .font(.system(size: 10, design: .monospaced))
                 }
             }
 
-            Button("Reset Position & Fonts") {
-                if waveUsesCanonicalLayout {
-                    canonicalLayoutService.resetControlPosition(id)
-                } else {
-                    offsetService.resetOffset(id)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("EDIT FRAME")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 8) {
+                    nudgeField(title: "X", text: $originXText) {
+                        canonicalLayoutService.setOrigin(
+                            CGPoint(x: CGFloat(Int(originXText) ?? Int(origin.x)), y: CGFloat(Int(originYText) ?? Int(origin.y))),
+                            for: id
+                        )
+                    }
+                    nudgeField(title: "Y", text: $originYText) {
+                        canonicalLayoutService.setOrigin(
+                            CGPoint(x: CGFloat(Int(originXText) ?? Int(origin.x)), y: CGFloat(Int(originYText) ?? Int(origin.y))),
+                            for: id
+                        )
+                    }
                 }
-                offsetService.resetStyle(id)
+
+                HStack(spacing: 8) {
+                    nudgeField(title: "W", text: $widthText) {
+                        canonicalLayoutService.setSize(
+                            CGSize(width: CGFloat(Int(widthText) ?? Int(frame.width)), height: CGFloat(Int(heightText) ?? Int(frame.height))),
+                            for: id
+                        )
+                    }
+                    nudgeField(title: "H", text: $heightText) {
+                        canonicalLayoutService.setSize(
+                            CGSize(width: CGFloat(Int(widthText) ?? Int(frame.width)), height: CGFloat(Int(heightText) ?? Int(frame.height))),
+                            for: id
+                        )
+                    }
+                }
+            }
+
+            if case .knob = controlType {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("KNOB SIZE")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(.secondary)
+
+                    HStack(spacing: 8) {
+                        nudgeField(title: "SIZE", text: $knobSizeText) {
+                            let fallback = Int(displayedKnobSize(fromStored: knobSize ?? 44))
+                            canonicalLayoutService.setKnobSize(
+                                storedKnobSize(fromDisplayed: CGFloat(Int(knobSizeText) ?? fallback)),
+                                for: id
+                            )
+                            syncFields()
+                        }
+                    }
+
+                    LazyVGrid(
+                        columns: [
+                            GridItem(.flexible(minimum: 0), spacing: 8),
+                            GridItem(.flexible(minimum: 0), spacing: 8)
+                        ],
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
+                        ForEach(knobSizePresets, id: \.label) { preset in
+                            knobSizePresetButton(
+                                label: preset.label,
+                                size: preset.size,
+                                isSelected: Int(knobSize ?? 0) == Int(preset.size)
+                            )
+                        }
+                    }
+                }
+            }
+
+            Button("Reset Position") {
+                canonicalLayoutService.resetControlPosition(id)
             }
             .font(.system(size: 11))
             .foregroundColor(Theme.waveHighlight)
             .buttonStyle(.plain)
         }
         .padding(16)
-        .frame(width: 260)
+        .frame(width: 280)
+        .onAppear {
+            syncFields()
+        }
     }
 
     private func iconName(for ct: NudgeControlType) -> String {
@@ -228,6 +236,56 @@ struct NudgeControlInspector: View {
         case .label:  return "textformat"
         }
     }
+
+    private func syncFields() {
+        let frame = canonicalLayoutService.frame(for: id) ?? .zero
+        originXText = "\(Int(frame.origin.x))"
+        originYText = "\(Int(frame.origin.y))"
+        widthText = "\(Int(frame.size.width))"
+        heightText = "\(Int(frame.size.height))"
+        let knobSize = canonicalLayoutService.knobSize(for: id) ?? controlType?.knobSize
+        knobSizeText = knobSize.map { "\(Int(displayedKnobSize(fromStored: $0)))" } ?? ""
+    }
+
+    private func nudgeField(title: String, text: Binding<String>, onCommit: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(.secondary)
+            TextField(title, text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(width: 56)
+                .onSubmit(onCommit)
+        }
+    }
+
+    private func knobSizePresetButton(label: String, size: CGFloat, isSelected: Bool) -> some View {
+        Button {
+            canonicalLayoutService.setKnobSize(size, for: id)
+            syncFields()
+        } label: {
+            Text("\(label) (\(Int(displayedKnobSize(fromStored: size))))")
+                .font(.system(size: 10, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .foregroundStyle(isSelected ? Color.black : Color.primary)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isSelected ? Color.orange : Color.secondary.opacity(0.12))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func displayedKnobSize(fromStored stored: CGFloat) -> CGFloat {
+        max(1, stored - knobVisualInset)
+    }
+
+    private func storedKnobSize(fromDisplayed displayed: CGFloat) -> CGFloat {
+        max(24, displayed + knobVisualInset)
+    }
 }
 
 // MARK: - Nudgeable Modifier
@@ -235,95 +293,20 @@ struct NudgeControlInspector: View {
 struct NudgeableModifier: ViewModifier {
     let id:          String
     var controlType: NudgeControlType? = nil
-    @ObservedObject var offsetService  = LayoutOffsetService.shared
     @ObservedObject var canonicalLayoutService = WavePanelLayoutService.shared
     @Environment(\.isTuningMode) var isTuningMode
-    @Environment(\.waveUsesCanonicalLayout) private var waveUsesCanonicalLayout
 
     @State private var showInspector = false
+    @State private var tuningDragActive = false
+    @State private var shiftToggleHandledOnBegin = false
 
     func body(content: Content) -> some View {
-        let baseFrame = canonicalLayoutService.baseFrames[id] ?? .zero
-        let storedOffset = if waveUsesCanonicalLayout,
-                              let origin = canonicalLayoutService.origin(for: id),
-                              baseFrame != .zero {
-            CGSize(width: origin.x - baseFrame.minX, height: origin.y - baseFrame.minY)
-        } else {
-            offsetService.offset(for: id)
-        }
-        let dynamicDelta = if waveUsesCanonicalLayout {
-            canonicalLayoutService.selectedIDs.contains(id) ? canonicalLayoutService.activeDragDelta : .zero
-        } else {
-            offsetService.selectedIDs.contains(id) ? offsetService.activeDragDelta : .zero
-        }
-        let currentOffset = CGSize(
-            width:  storedOffset.width  + dynamicDelta.width,
-            height: storedOffset.height + dynamicDelta.height
-        )
-
-        content
-            .allowsHitTesting(!(isTuningMode && waveUsesCanonicalLayout) && !isTuningMode)
-            .overlay(
-                ZStack {
-                    if isTuningMode {
-                        let selectionIDs = waveUsesCanonicalLayout ? canonicalLayoutService.selectedIDs : offsetService.selectedIDs
-                        let keyObjectID = waveUsesCanonicalLayout ? canonicalLayoutService.keyObjectID : offsetService.keyObjectID
-                        let isSelected  = selectionIDs.contains(id)
-                        let isKeyObject = keyObjectID == id && isSelected
-
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(isSelected ? Theme.waveHighlight.opacity(0.15) : Color.clear)
-                            .stroke(
-                                isSelected ? Theme.waveHighlight : Theme.waveHighlight.opacity(0.3),
-                                style: StrokeStyle(lineWidth: isKeyObject ? 3 : (isSelected ? 2 : 1),
-                                                   dash: isSelected ? [] : [4])
-                            )
-                            .padding(-4)
-                            .allowsHitTesting(false)
-
-                        Color.white.opacity(0.001)
-                            .contentShape(Rectangle())
-                            .contextMenu {
-                                Button("Control Inspector…") { showInspector = true }
-                                Divider()
-                                let isHighlighted = offsetService.style(for: id).highlighted
-                                Button(isHighlighted ? "Remove Highlight" : "Highlight Knob") {
-                                    offsetService.setHighlighted(id, !isHighlighted)
-                                }
-                                Button("Set as Key Object") {
-                                    if waveUsesCanonicalLayout {
-                                        canonicalLayoutService.select(id, exclusive: false)
-                                    } else {
-                                        offsetService.select(id, exclusive: false)
-                                        offsetService.keyObjectID = id
-                                    }
-                                }
-                                .disabled(!selectionIDs.contains(id))
-                                Divider()
-                                Button("Reset Position") {
-                                    if waveUsesCanonicalLayout {
-                                        canonicalLayoutService.resetControlPosition(id)
-                                    } else {
-                                        offsetService.resetOffset(id)
-                                    }
-                                }
-                                Button("Reset Fonts")    { offsetService.resetStyle(id)  }
-                                Button("Reset All") {
-                                    if waveUsesCanonicalLayout {
-                                        canonicalLayoutService.resetControlPosition(id)
-                                    } else {
-                                        offsetService.resetOffset(id)
-                                    }
-                                    offsetService.resetStyle(id)
-                                }
-                            }
-                            .popover(isPresented: $showInspector, arrowEdge: .leading) {
-                                NudgeControlInspector(id: id, controlType: controlType,
-                                                      offsetService: offsetService)
-                            }
-                    }
-                }
-            )
+        let selectionIDs = canonicalLayoutService.selectedIDs
+        let keyObjectID = canonicalLayoutService.keyObjectID
+        let isSelected = selectionIDs.contains(id)
+        let isKeyObject = keyObjectID == id && isSelected
+        let wrapped = content
+            .allowsHitTesting(!isTuningMode)
             .background(
                 GeometryReader { proxy in
                     Color.clear.preference(
@@ -332,15 +315,113 @@ struct NudgeableModifier: ViewModifier {
                     )
                 }
             )
-            .offset(currentOffset)
-            .onAppear {
-                if !waveUsesCanonicalLayout {
-                    DispatchQueue.main.async { offsetService.register(id) }
+            .overlay {
+                if isTuningMode {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isSelected ? Theme.waveHighlight.opacity(0.15) : Color.clear)
+                        .stroke(
+                            isSelected ? Theme.waveHighlight : Theme.waveHighlight.opacity(0.3),
+                            style: StrokeStyle(
+                                lineWidth: isKeyObject ? 3 : (isSelected ? 2 : 1),
+                                dash: isSelected ? [] : [4]
+                            )
+                        )
+                        .padding(-4)
+                        .allowsHitTesting(false)
                 }
             }
-            .onDisappear {
-                if !waveUsesCanonicalLayout {
-                    DispatchQueue.main.async { offsetService.unregister(id) }
+            .zIndex(isTuningMode && isSelected ? 1000 : 0)
+
+        applyTuningGesture(to: wrapped)
+        .contextMenu {
+            Button("Control Inspector…") {
+                DispatchQueue.main.async {
+                    if !canonicalLayoutService.selectedIDs.contains(id) {
+                        canonicalLayoutService.select(id)
+                    }
+                    showInspector = true
+                }
+            }
+            Button(canonicalLayoutService.highlightedID == id ? "Unhighlight Knob" : "Highlight Knob") {
+                canonicalLayoutService.toggleHighlight(id)
+            }
+            Divider()
+            Button("Set as Key Object") {
+                canonicalLayoutService.select(id, exclusive: false)
+            }
+            .disabled(!selectionIDs.contains(id))
+            Divider()
+            Button("Reset Position") {
+                canonicalLayoutService.resetControlPosition(id)
+            }
+        }
+        .popover(isPresented: $showInspector, arrowEdge: .leading) {
+            NudgeControlInspector(id: id, controlType: controlType)
+        }
+    }
+
+    @ViewBuilder
+    private func applyTuningGesture<Wrapped: View>(to view: Wrapped) -> some View {
+        if isTuningMode {
+            view
+                .contentShape(Rectangle())
+                .highPriorityGesture(tuningDragGesture, including: .all)
+        } else {
+            view
+        }
+    }
+
+    private var tuningDragGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named("wavePanel"))
+            .onChanged { value in
+                guard isTuningMode else { return }
+
+                if !tuningDragActive {
+                    tuningDragActive = true
+                    showInspector = false
+                    shiftToggleHandledOnBegin = false
+                    let shift = NSEvent.modifierFlags.contains(.shift)
+                    if shift {
+                        canonicalLayoutService.toggleSelection(id)
+                        shiftToggleHandledOnBegin = true
+                    } else if !canonicalLayoutService.selectedIDs.contains(id) {
+                        canonicalLayoutService.select(id)
+                    }
+                }
+
+                guard canonicalLayoutService.selectedIDs.contains(id) else { return }
+
+                var translation = value.translation
+                if NSEvent.modifierFlags.contains(.shift) {
+                    abs(translation.width) > abs(translation.height)
+                        ? (translation.height = 0)
+                        : (translation.width = 0)
+                }
+                let grid: CGFloat = 2
+                translation.width = round(translation.width / grid) * grid
+                translation.height = round(translation.height / grid) * grid
+                canonicalLayoutService.updateDrag(delta: translation)
+            }
+            .onEnded { value in
+                guard isTuningMode else { return }
+                defer {
+                    tuningDragActive = false
+                    shiftToggleHandledOnBegin = false
+                }
+
+                let moved = value.translation.width.magnitude > 3 || value.translation.height.magnitude > 3
+                if moved {
+                    canonicalLayoutService.commitDrag()
+                } else {
+                    let shift = NSEvent.modifierFlags.contains(.shift)
+                    if shift {
+                        if !shiftToggleHandledOnBegin {
+                            canonicalLayoutService.toggleSelection(id)
+                        }
+                    } else {
+                        canonicalLayoutService.select(id)
+                    }
+                    canonicalLayoutService.activeDragDelta = .zero
                 }
             }
     }

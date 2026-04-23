@@ -46,7 +46,7 @@ enum SidebarItem: Hashable {
 
 enum AppViewMode: String, CaseIterable, Identifiable {
     case editor   = "Patch"
-    case samples  = "Samples"
+    case transient  = "Transient"
     case banks    = "Banks"
     case galaxy   = "Galaxy"
     case monitor  = "Monitor"
@@ -57,7 +57,7 @@ enum AppViewMode: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .editor:   return "slider.horizontal.3"
-        case .samples:  return "pianokeys"
+        case .transient:  return "pianokeys"
         case .banks:    return "building.columns"
         case .galaxy:   return "sparkles"
         case .monitor:  return "desktopcomputer"
@@ -391,7 +391,7 @@ struct DetailView: View {
                 PatchEditorView()
                     .frame(maxWidth: .infinity)
             }
-        case .samples:
+        case .transient:
             SampleMapperView(mapper: sampleMapperState)
         case .banks:
             BankMemoryView(scrollToBank: 0)

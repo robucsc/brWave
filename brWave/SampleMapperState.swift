@@ -9,6 +9,45 @@ import Combine
 import Foundation
 import UniformTypeIdentifiers
 
+private final class SamplePlaybackEngine {
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let varispeed = AVAudioUnitVarispeed()
+
+    init() {
+        engine.attach(player)
+        engine.attach(varispeed)
+        engine.connect(player, to: varispeed, format: nil)
+        engine.connect(varispeed, to: engine.mainMixerNode, format: nil)
+        startIfNeeded()
+    }
+
+    func play(sample: SampleZone, midiNote: Int) {
+        guard let file = try? AVAudioFile(forReading: sample.url) else { return }
+        startIfNeeded()
+
+        let semitoneDelta = Double(midiNote - sample.rootNote.midi)
+        varispeed.rate = Float(pow(2.0, semitoneDelta / 12.0))
+
+        let totalFrames = sample.totalFrames ?? Int(file.length)
+        let startFrame = AVAudioFramePosition(0)
+        let frameCount = AVAudioFrameCount(max(0, totalFrames))
+
+        player.stop()
+        player.scheduleSegment(file, startingFrame: startFrame, frameCount: frameCount, at: nil)
+        player.play()
+    }
+
+    func stop() {
+        player.stop()
+    }
+
+    private func startIfNeeded() {
+        guard !engine.isRunning else { return }
+        try? engine.start()
+    }
+}
+
 @MainActor
 final class SampleMapperState: ObservableObject {
     struct RootConflictChoice: Identifiable {
@@ -32,6 +71,7 @@ final class SampleMapperState: ObservableObject {
     @Published var waveformPan: Double = 0.0
     @Published private(set) var waveformCache: [UUID: SampleWaveform] = [:]
     @Published var rootConflictChoice: RootConflictChoice?
+    @Published var statusMessage: String?
 
     var selectedSample: SampleZone? {
         get { samples.first(where: { $0.id == selectedSampleID }) }
@@ -47,6 +87,8 @@ final class SampleMapperState: ObservableObject {
         return waveformCache[selectedSampleID]
     }
 
+    private let playbackEngine = SamplePlaybackEngine()
+
     func importFiles() {
         let panel = NSOpenPanel()
         panel.title = "Import Samples"
@@ -58,6 +100,7 @@ final class SampleMapperState: ObservableObject {
             UTType(filenameExtension: "wav") ?? .audio,
             UTType(filenameExtension: "aiff") ?? .audio,
             UTType(filenameExtension: "aif") ?? .audio,
+            UTType(filenameExtension: "caf") ?? .audio,
             UTType(filenameExtension: "yaf") ?? .data,
             UTType(filenameExtension: "sdi") ?? .data,
             UTType(filenameExtension: "sdii") ?? .data
@@ -80,9 +123,11 @@ final class SampleMapperState: ObservableObject {
     }
 
     func clear() {
+        playbackEngine.stop()
         samples.removeAll()
         selectedSampleID = nil
         waveformCache.removeAll()
+        statusMessage = nil
     }
 
     func autoMap() {
@@ -93,20 +138,44 @@ final class SampleMapperState: ObservableObject {
         )
     }
 
+    /// Number of samples currently assigned a TR slot.
+    var slotsUsed: Int { samples.filter { $0.trSlot != nil }.count }
+
+    /// True when at or over the 32-slot hardware limit.
+    var atSlotLimit: Bool { samples.count >= Self.maxTransientSlots }
+
+    func updateTRSlot(for sampleID: UUID, to slot: Int?) {
+        guard let idx = samples.firstIndex(where: { $0.id == sampleID }) else { return }
+        samples[idx].trSlot = slot
+    }
+
     func updateRoot(for sampleID: UUID, to note: SampleNote) {
         guard let idx = samples.firstIndex(where: { $0.id == sampleID }) else { return }
         samples[idx].rootNote = note
-        autoMap()
+        if samples[idx].lowNote > note {
+            samples[idx].lowNote = note
+        }
+        if samples[idx].highNote < note {
+            samples[idx].highNote = note
+        }
     }
 
     func updateLow(for sampleID: UUID, to note: SampleNote) {
         guard let idx = samples.firstIndex(where: { $0.id == sampleID }) else { return }
-        samples[idx].lowNote = note
+        let clamped = min(note, samples[idx].highNote)
+        samples[idx].lowNote = clamped
+        if samples[idx].rootNote < clamped {
+            samples[idx].rootNote = clamped
+        }
     }
 
     func updateHigh(for sampleID: UUID, to note: SampleNote) {
         guard let idx = samples.firstIndex(where: { $0.id == sampleID }) else { return }
-        samples[idx].highNote = note
+        let clamped = max(note, samples[idx].lowNote)
+        samples[idx].highNote = clamped
+        if samples[idx].rootNote > clamped {
+            samples[idx].rootNote = clamped
+        }
     }
 
     func updateLoopStart(for sampleID: UUID, to frame: Int) {
@@ -126,15 +195,70 @@ final class SampleMapperState: ObservableObject {
         loadWaveformIfNeeded(for: sampleID)
     }
 
+    func previewMappedSample(for midiNote: Int) {
+        guard let sample = mappedSample(for: midiNote) else { return }
+        selectedSampleID = sample.id
+        loadWaveformIfNeeded(for: sample.id)
+        playbackEngine.play(sample: sample, midiNote: midiNote)
+    }
+
+    func stopPreviewPlayback() {
+        playbackEngine.stop()
+    }
+
+    func exportMappingPackage() {
+        guard !samples.isEmpty else {
+            statusMessage = "Import some transients before exporting a map folder."
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "Export Transient Map"
+        panel.message = "Create a folder containing the JSON map and the imported transients."
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "TransientMap.brwavemap"
+        panel.allowedContentTypes = [UTType(filenameExtension: "brwavemap") ?? .folder]
+
+        guard panel.runModal() == .OK, let packageURL = panel.url else { return }
+
+        do {
+            try writeMappingPackage(to: packageURL)
+            statusMessage = "Exported map package to \(packageURL.lastPathComponent)."
+        } catch {
+            statusMessage = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
+    static let maxTransientSlots = 32
+    static let firstTransientSlot = 32   // TR slots 32–63
+
     private func importURLs(_ urls: [URL]) {
-        let built = urls.compactMap(buildSample(from:))
+        var built = urls.compactMap(buildSample(from:))
         guard !built.isEmpty else { return }
+
+        // Enforce hardware 32-slot maximum
+        if built.count > Self.maxTransientSlots {
+            statusMessage = "⚠️ Only 32 transient slots available — \(built.count - Self.maxTransientSlots) file(s) dropped."
+            built = Array(built.prefix(Self.maxTransientSlots))
+        }
+
+        // Auto-assign TR slots 32–63 in order
+        for i in built.indices {
+            built[i].trSlot = Self.firstTransientSlot + i
+        }
 
         samples = SampleAutoMapper.assignZones(
             built,
             lowerReach: lowerReachSemitones,
             upperReach: upperReachSemitones
         )
+
+        // Re-apply slot assignments after auto-map (assignZones reorders but preserves IDs)
+        let slotMap = Dictionary(uniqueKeysWithValues: built.map { ($0.id, $0.trSlot) })
+        for i in samples.indices {
+            samples[i].trSlot = slotMap[samples[i].id] ?? nil
+        }
+
         if let firstID = samples.first?.id {
             selectSample(firstID)
         }
@@ -146,12 +270,12 @@ final class SampleMapperState: ObservableObject {
         guard let format = SampleFileFormat.from(url: url) else { return nil }
         let filenameRoot = SamplePitchDetector.detectFilenameRootNote(from: url)
         let analyzedRoot = SamplePitchDetector.detectAnalyzedRootNote(from: url)
-        let detectedRoot = analyzedRoot ?? filenameRoot
+        let metadata = readAudioMetadata(from: url, format: format)
+        let detectedRoot = metadata.embeddedRootNote ?? filenameRoot ?? analyzedRoot
         let initialRoot = detectedRoot ?? .c3
         let fileAttributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let fileSize = (fileAttributes?[.size] as? NSNumber)?.int64Value ?? 0
 
-        let metadata = readAudioMetadata(from: url)
         let totalFrames = metadata.totalFrames
 
         return SampleZone(
@@ -163,8 +287,9 @@ final class SampleMapperState: ObservableObject {
             highNote: initialRoot,
             detectedRootNote: detectedRoot,
             filenameRootNote: filenameRoot,
+            fileEmbeddedRootNote: metadata.embeddedRootNote,
             analyzedRootNote: analyzedRoot,
-            loopPoints: SampleLoopPoints(startFrame: 0, endFrame: totalFrames ?? 0),
+            loopPoints: metadata.loopPoints ?? SampleLoopPoints(startFrame: 0, endFrame: totalFrames ?? 0),
             totalFrames: totalFrames,
             sampleRate: metadata.sampleRate,
             channelCount: metadata.channelCount,
@@ -217,16 +342,8 @@ final class SampleMapperState: ObservableObject {
         }
     }
 
-    private func readAudioMetadata(from url: URL) -> (totalFrames: Int?, sampleRate: Double?, channelCount: Int?) {
-        guard let audioFile = try? AVAudioFile(forReading: url) else {
-            return (nil, nil, nil)
-        }
-
-        return (
-            Int(audioFile.length),
-            audioFile.processingFormat.sampleRate,
-            Int(audioFile.processingFormat.channelCount)
-        )
+    private func readAudioMetadata(from url: URL, format: SampleFileFormat) -> SampleFileMetadata {
+        SampleFileMetadataReader.read(from: url, format: format)
     }
 
     private func loadWaveformIfNeeded(for sampleID: UUID) {
@@ -286,6 +403,7 @@ final class SampleMapperState: ObservableObject {
 
     private func queueRootConflictPromptIfNeeded() {
         guard rootConflictChoice == nil else { return }
+        guard samples.allSatisfy({ $0.fileEmbeddedRootNote == nil }) else { return }
         guard let conflicted = samples.first(where: \.rootDetectionConflict),
               let filenameRoot = conflicted.filenameRootNote,
               let analyzedRoot = conflicted.analyzedRootNote else { return }
@@ -296,5 +414,84 @@ final class SampleMapperState: ObservableObject {
             filenameRoot: filenameRoot,
             analyzedRoot: analyzedRoot
         )
+    }
+
+    private func mappedSample(for midiNote: Int) -> SampleZone? {
+        if let selectedSample, (selectedSample.lowNote.midi...selectedSample.highNote.midi).contains(midiNote) {
+            return selectedSample
+        }
+
+        let candidates = samples.filter { ($0.lowNote.midi...$0.highNote.midi).contains(midiNote) }
+        if let best = candidates.min(by: {
+            abs($0.rootNote.midi - midiNote) < abs($1.rootNote.midi - midiNote)
+        }) {
+            return best
+        }
+
+        return selectedSample ?? samples.first
+    }
+
+    private func writeMappingPackage(to packageURL: URL) throws {
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: packageURL, withIntermediateDirectories: true)
+
+        let transientsURL = packageURL.appendingPathComponent("Transients", isDirectory: true)
+        try fileManager.createDirectory(at: transientsURL, withIntermediateDirectories: true)
+
+        var entries: [SampleMapPackage.Entry] = []
+        entries.reserveCapacity(samples.count)
+
+        for (index, sample) in samples.enumerated() {
+            let exportName = exportedTransientFilename(for: sample, index: index)
+            let destinationURL = transientsURL.appendingPathComponent(exportName)
+
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: sample.url, to: destinationURL)
+
+            entries.append(
+                SampleMapPackage.Entry(
+                    slotIndex: index,
+                    displayName: sample.displayName,
+                    exportedFileName: exportName,
+                    originalRelativePath: sample.url.lastPathComponent,
+                    format: sample.format.rawValue,
+                    rootMIDINote: sample.rootNote.midi,
+                    lowMIDINote: sample.lowNote.midi,
+                    highMIDINote: sample.highNote.midi,
+                    detectedRootMIDINote: sample.detectedRootNote?.midi,
+                    embeddedRootMIDINote: sample.fileEmbeddedRootNote?.midi,
+                    loopStartFrame: sample.loopPoints.startFrame,
+                    loopEndFrame: sample.loopPoints.endFrame,
+                    totalFrames: sample.totalFrames,
+                    sampleRate: sample.sampleRate,
+                    channelCount: sample.channelCount,
+                    fileSize: sample.fileSize
+                )
+            )
+        }
+
+        let package = SampleMapPackage(
+            version: 1,
+            createdAtISO8601: ISO8601DateFormatter().string(from: Date()),
+            sampleCount: samples.count,
+            lowerReachSemitones: lowerReachSemitones,
+            upperReachSemitones: upperReachSemitones,
+            entries: entries
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let mapData = try encoder.encode(package)
+        try mapData.write(to: packageURL.appendingPathComponent("map.json"), options: .atomic)
+    }
+
+    private func exportedTransientFilename(for sample: SampleZone, index: Int) -> String {
+        let base = sample.url.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let ext = sample.url.pathExtension.isEmpty ? sample.format.rawValue : sample.url.pathExtension
+        return String(format: "%02d_%@.%@", index + 1, base, ext)
     }
 }

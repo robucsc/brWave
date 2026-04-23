@@ -142,13 +142,17 @@ struct SampleMapperView: View {
                 SampleKeyboardMapView(
                     samples: mapper.samples,
                     selectedSampleID: mapper.selectedSampleID,
-                    onSelectSample: { mapper.selectSample($0) }
+                    onSelectSample: { mapper.selectSample($0) },
+                    onPreviewNote: { mapper.previewMappedSample(for: $0) },
+                    onStopPreviewNote: { mapper.stopPreviewPlayback() }
                 )
                     .frame(height: 194)
                     .padding(.horizontal, 20)
 
                 SampleZoneEditorCard(
                     sample: sample,
+                    onPlayRoot: { mapper.previewMappedSample(for: sample.rootNote.midi) },
+                    onStopPlayback: { mapper.stopPreviewPlayback() },
                     onRootChange: { mapper.updateRoot(for: sample.id, to: $0) },
                     onLowChange: { mapper.updateLow(for: sample.id, to: $0) },
                     onHighChange: { mapper.updateHigh(for: sample.id, to: $0) },
@@ -722,6 +726,8 @@ private struct InwardLoopHandleTriangle: Shape {
 
 private struct SampleZoneEditorCard: View {
     let sample: SampleZone
+    let onPlayRoot: () -> Void
+    let onStopPlayback: () -> Void
     let onRootChange: (SampleNote) -> Void
     let onLowChange: (SampleNote) -> Void
     let onHighChange: (SampleNote) -> Void
@@ -743,6 +749,22 @@ private struct SampleZoneEditorCard: View {
                 if let channels = sample.channelCount {
                     detailPill("Channels", "\(channels)")
                 }
+
+                Spacer()
+
+                Button {
+                    onPlayRoot()
+                } label: {
+                    Label("Play Root", systemImage: "play.fill")
+                }
+                .buttonStyle(.borderedProminent)
+
+                Button {
+                    onStopPlayback()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(.bordered)
             }
 
             HStack(alignment: .top, spacing: 20) {
@@ -829,13 +851,18 @@ private struct SampleKeyboardMapView: View {
     let samples: [SampleZone]
     let selectedSampleID: UUID?
     let onSelectSample: (UUID) -> Void
+    let onPreviewNote: (Int) -> Void
+    let onStopPreviewNote: () -> Void
+    @State private var activePreviewMIDINote: Int?
     private let visibleRange = 24...96
     private let zoneBandHeight: CGFloat = 74
     private let keyBedHeight: CGFloat = 92
+    private let blackKeyHeight: CGFloat = 56
 
     var body: some View {
         GeometryReader { geo in
             let whiteKeyWidth = geo.size.width / CGFloat(max(1, whiteKeyMIDIs.count))
+            let indexMap = whiteKeyIndexMap()
 
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 18)
@@ -858,6 +885,23 @@ private struct SampleKeyboardMapView: View {
                         blackKeys(whiteKeyWidth: whiteKeyWidth)
                     }
                     .frame(height: keyBedHeight)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { gesture in
+                                updatePreviewNote(
+                                    noteAtPoint(
+                                        gesture.location,
+                                        whiteKeyWidth: whiteKeyWidth,
+                                        indexMap: indexMap,
+                                        totalWidth: geo.size.width
+                                    )
+                                )
+                            }
+                            .onEnded { _ in
+                                stopPreviewNote()
+                            }
+                    )
                 }
             }
         }
@@ -897,6 +941,17 @@ private struct SampleKeyboardMapView: View {
                             RoundedRectangle(cornerRadius: 2)
                                 .stroke(Color.black.opacity(0.22), lineWidth: 0.8)
                         )
+                        .overlay {
+                            if activePreviewMIDINote == midi {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(Theme.waveHighlight.opacity(0.18))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .stroke(Theme.waveHighlight.opacity(0.9), lineWidth: 1.4)
+                                    )
+                                    .padding(.horizontal, 0.5)
+                            }
+                        }
                         .shadow(color: Color.black.opacity(0.08), radius: 1.5, y: 1)
                         .padding(.horizontal, 0.5)
                         .overlay(alignment: .bottomLeading) {
@@ -930,19 +985,19 @@ private struct SampleKeyboardMapView: View {
             ForEach(Array(visibleRange), id: \.self) { midi in
                 if isBlackKey(midi), let leftWhiteIndex = leftWhiteIndex(for: midi, indexMap: indexMap) {
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.black.opacity(0.95))
+                        .fill(activePreviewMIDINote == midi ? Theme.waveHighlight.opacity(0.92) : Color.black.opacity(0.95))
                         .overlay(alignment: .top) {
                             RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.white.opacity(0.1))
+                                .fill(activePreviewMIDINote == midi ? Color.white.opacity(0.22) : Color.white.opacity(0.1))
                                 .frame(height: 6)
                         }
                         .overlay(
                             RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.white.opacity(0.06), lineWidth: 0.6)
+                                .stroke(activePreviewMIDINote == midi ? Color.white.opacity(0.45) : Color.white.opacity(0.06), lineWidth: activePreviewMIDINote == midi ? 1.0 : 0.6)
                         )
-                        .frame(width: whiteKeyWidth * 0.54, height: 56)
-                        .offset(x: CGFloat(leftWhiteIndex + 1) * whiteKeyWidth - (whiteKeyWidth * 0.26), y: -1)
+                        .frame(width: whiteKeyWidth * 0.54, height: blackKeyHeight)
                         .shadow(color: Color.black.opacity(0.28), radius: 1.2, y: 1)
+                    .offset(x: CGFloat(leftWhiteIndex + 1) * whiteKeyWidth - (whiteKeyWidth * 0.26), y: -1)
                 }
             }
         }
@@ -1085,5 +1140,42 @@ private struct SampleKeyboardMapView: View {
 
     private func isBlackKey(_ midi: Int) -> Bool {
         [1, 3, 6, 8, 10].contains(midi % 12)
+    }
+
+    private func noteAtPoint(_ point: CGPoint, whiteKeyWidth: CGFloat, indexMap: [Int: Int], totalWidth: CGFloat) -> Int? {
+        let clampedX = min(max(0, point.x), max(0, totalWidth - 1))
+        let clampedY = min(max(0, point.y), keyBedHeight)
+
+        if clampedY <= blackKeyHeight {
+            for midi in visibleRange {
+                guard isBlackKey(midi), let leftWhiteIndex = leftWhiteIndex(for: midi, indexMap: indexMap) else { continue }
+                let blackWidth = whiteKeyWidth * 0.54
+                let blackMinX = CGFloat(leftWhiteIndex + 1) * whiteKeyWidth - (whiteKeyWidth * 0.26)
+                let blackMaxX = blackMinX + blackWidth
+                if clampedX >= blackMinX && clampedX <= blackMaxX {
+                    return midi
+                }
+            }
+        }
+
+        let whiteIndex = min(max(0, Int(clampedX / max(1, whiteKeyWidth))), max(0, whiteKeyMIDIs.count - 1))
+        guard whiteKeyMIDIs.indices.contains(whiteIndex) else { return nil }
+        return whiteKeyMIDIs[whiteIndex]
+    }
+
+    private func updatePreviewNote(_ midiNote: Int?) {
+        guard let midiNote else {
+            stopPreviewNote()
+            return
+        }
+        guard activePreviewMIDINote != midiNote else { return }
+        activePreviewMIDINote = midiNote
+        onPreviewNote(midiNote)
+    }
+
+    private func stopPreviewNote() {
+        guard activePreviewMIDINote != nil else { return }
+        activePreviewMIDINote = nil
+        onStopPreviewNote()
     }
 }

@@ -277,7 +277,8 @@ enum WaveSysExParser {
             if case .perGroup(let offset) = desc.storage {
                 let idx = base + offset
                 guard idx < payload.count else { continue }
-                result[desc.id] = Int(payload[idx])
+                let raw = Int(payload[idx])
+                result[desc.id] = min(max(raw, desc.range.lowerBound), desc.range.upperBound)
             }
         }
         return result
@@ -288,7 +289,9 @@ enum WaveSysExParser {
             if case .perGroup(let offset) = desc.storage {
                 let idx = base + offset
                 guard idx < payload.count else { continue }
-                payload[idx] = UInt8(clamping: group[desc.id] ?? 0)
+                let raw = group[desc.id] ?? 0
+                let clamped = min(max(raw, desc.range.lowerBound), desc.range.upperBound)
+                payload[idx] = UInt8(clamping: clamped)
             }
         }
     }

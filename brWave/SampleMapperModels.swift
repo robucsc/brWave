@@ -9,6 +9,7 @@ import Foundation
 enum SampleFileFormat: String, CaseIterable, Identifiable {
     case wav
     case aiff
+    case caf
     case yaf
     case sdi
     case sdii
@@ -20,7 +21,7 @@ enum SampleFileFormat: String, CaseIterable, Identifiable {
     }
 
     static let supportedExtensions: Set<String> = [
-        "wav", "aiff", "aif", "yaf", "sdi", "sdii"
+        "wav", "aiff", "aif", "caf", "yaf", "sdi", "sdii"
     ]
 
     static func from(url: URL) -> SampleFileFormat? {
@@ -29,6 +30,8 @@ enum SampleFileFormat: String, CaseIterable, Identifiable {
             return .wav
         case "aiff", "aif":
             return .aiff
+        case "caf":
+            return .caf
         case "yaf":
             return .yaf
         case "sdi":
@@ -91,24 +94,255 @@ struct SampleZone: Identifiable, Hashable {
     var highNote: SampleNote
     var detectedRootNote: SampleNote?
     var filenameRootNote: SampleNote?
+    var fileEmbeddedRootNote: SampleNote?
     var analyzedRootNote: SampleNote?
     var loopPoints: SampleLoopPoints
     var totalFrames: Int?
     var sampleRate: Double?
     var channelCount: Int?
     var fileSize: Int64
+    /// Hardware TR slot assignment (32–63). Nil = unassigned.
+    var trSlot: Int?
 
     var displayName: String {
         url.lastPathComponent
     }
 
     var rootWasDetected: Bool {
-        filenameRootNote != nil || analyzedRootNote != nil
+        filenameRootNote != nil || fileEmbeddedRootNote != nil || analyzedRootNote != nil
     }
 
     var rootDetectionConflict: Bool {
         guard let filenameRootNote, let analyzedRootNote else { return false }
         return filenameRootNote != analyzedRootNote
+    }
+}
+
+struct SampleFileMetadata {
+    var totalFrames: Int?
+    var sampleRate: Double?
+    var channelCount: Int?
+    var loopPoints: SampleLoopPoints?
+    var embeddedRootNote: SampleNote?
+}
+
+struct SampleMapPackage: Codable {
+    struct Entry: Codable {
+        let slotIndex: Int
+        let displayName: String
+        let exportedFileName: String
+        let originalRelativePath: String
+        let format: String
+        let rootMIDINote: Int
+        let lowMIDINote: Int
+        let highMIDINote: Int
+        let detectedRootMIDINote: Int?
+        let embeddedRootMIDINote: Int?
+        let loopStartFrame: Int
+        let loopEndFrame: Int
+        let totalFrames: Int?
+        let sampleRate: Double?
+        let channelCount: Int?
+        let fileSize: Int64
+    }
+
+    let version: Int
+    let createdAtISO8601: String
+    let sampleCount: Int
+    let lowerReachSemitones: Int
+    let upperReachSemitones: Int
+    let entries: [Entry]
+}
+
+enum SampleFileMetadataReader {
+    static func read(from url: URL, format: SampleFileFormat) -> SampleFileMetadata {
+        let baseMetadata = readBaseAudioMetadata(from: url)
+        let embedded: (loopPoints: SampleLoopPoints?, root: SampleNote?)
+
+        switch format {
+        case .wav:
+            embedded = readWAVMetadata(from: url)
+        case .aiff:
+            embedded = readAIFFMetadata(from: url)
+        case .caf, .yaf, .sdi, .sdii:
+            embedded = (nil, nil)
+        }
+
+        return SampleFileMetadata(
+            totalFrames: baseMetadata.totalFrames,
+            sampleRate: baseMetadata.sampleRate,
+            channelCount: baseMetadata.channelCount,
+            loopPoints: embedded.loopPoints,
+            embeddedRootNote: embedded.root
+        )
+    }
+
+    private static func readBaseAudioMetadata(from url: URL) -> (totalFrames: Int?, sampleRate: Double?, channelCount: Int?) {
+        guard let audioFile = try? AVAudioFile(forReading: url) else {
+            return (nil, nil, nil)
+        }
+
+        return (
+            Int(audioFile.length),
+            audioFile.processingFormat.sampleRate,
+            Int(audioFile.processingFormat.channelCount)
+        )
+    }
+
+    private static func readWAVMetadata(from url: URL) -> (loopPoints: SampleLoopPoints?, root: SampleNote?) {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count >= 12,
+              data.ascii(at: 0, length: 4) == "RIFF",
+              data.ascii(at: 8, length: 4) == "WAVE" else {
+            return (nil, nil)
+        }
+
+        var offset = 12
+        var loopPoints: SampleLoopPoints?
+        var root: SampleNote?
+
+        while offset + 8 <= data.count {
+            let chunkID = data.ascii(at: offset, length: 4)
+            let chunkSize = Int(data.uint32LE(at: offset + 4))
+            let chunkStart = offset + 8
+            let chunkEnd = min(data.count, chunkStart + chunkSize)
+            guard chunkEnd >= chunkStart else { break }
+
+            switch chunkID {
+            case "smpl":
+                if chunkEnd - chunkStart >= 36 {
+                    let midiUnity = Int(data.uint32LE(at: chunkStart + 12))
+                    if (0...127).contains(midiUnity) {
+                        root = SampleNote(midi: midiUnity)
+                    }
+
+                    let loopCount = Int(data.uint32LE(at: chunkStart + 28))
+                    if loopCount > 0, chunkEnd - chunkStart >= 60 {
+                        let firstLoop = chunkStart + 36
+                        let start = Int(data.uint32LE(at: firstLoop + 8))
+                        let end = Int(data.uint32LE(at: firstLoop + 12))
+                        loopPoints = SampleLoopPoints(
+                            startFrame: max(0, start),
+                            endFrame: max(start, end)
+                        )
+                    }
+                }
+            case "inst":
+                if root == nil, chunkEnd - chunkStart >= 1 {
+                    let baseNote = Int(data[chunkStart])
+                    if (0...127).contains(baseNote) {
+                        root = SampleNote(midi: baseNote)
+                    }
+                }
+            default:
+                break
+            }
+
+            offset = chunkStart + chunkSize + (chunkSize % 2)
+        }
+
+        return (loopPoints, root)
+    }
+
+    private static func readAIFFMetadata(from url: URL) -> (loopPoints: SampleLoopPoints?, root: SampleNote?) {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count >= 12,
+              data.ascii(at: 0, length: 4) == "FORM" else {
+            return (nil, nil)
+        }
+
+        let formType = data.ascii(at: 8, length: 4)
+        guard formType == "AIFF" || formType == "AIFC" else {
+            return (nil, nil)
+        }
+
+        var offset = 12
+        var markerPositions: [UInt16: Int] = [:]
+        var loopPoints: SampleLoopPoints?
+        var root: SampleNote?
+
+        while offset + 8 <= data.count {
+            let chunkID = data.ascii(at: offset, length: 4)
+            let chunkSize = Int(data.uint32BE(at: offset + 4))
+            let chunkStart = offset + 8
+            let chunkEnd = min(data.count, chunkStart + chunkSize)
+            guard chunkEnd >= chunkStart else { break }
+
+            switch chunkID {
+            case "MARK":
+                if chunkEnd - chunkStart >= 2 {
+                    let markerCount = Int(data.uint16BE(at: chunkStart))
+                    var markerOffset = chunkStart + 2
+
+                    for _ in 0..<markerCount {
+                        guard markerOffset + 7 <= chunkEnd else { break }
+                        let markerID = data.uint16BE(at: markerOffset)
+                        let position = Int(data.uint32BE(at: markerOffset + 2))
+                        let nameLength = Int(data[markerOffset + 6])
+                        markerPositions[markerID] = position
+
+                        markerOffset += 7 + nameLength
+                        if (1 + nameLength) % 2 != 0 {
+                            markerOffset += 1
+                        }
+                    }
+                }
+            case "INST":
+                if chunkEnd - chunkStart >= 20 {
+                    let baseNote = Int(data[chunkStart])
+                    if (0...127).contains(baseNote) {
+                        root = SampleNote(midi: baseNote)
+                    }
+
+                    let sustainPlayMode = data.uint16BE(at: chunkStart + 8)
+                    if sustainPlayMode != 0 {
+                        let beginMarker = data.uint16BE(at: chunkStart + 10)
+                        let endMarker = data.uint16BE(at: chunkStart + 12)
+                        if let begin = markerPositions[beginMarker],
+                           let end = markerPositions[endMarker] {
+                            loopPoints = SampleLoopPoints(
+                                startFrame: max(0, begin),
+                                endFrame: max(begin, end)
+                            )
+                        }
+                    }
+                }
+            default:
+                break
+            }
+
+            offset = chunkStart + chunkSize + (chunkSize % 2)
+        }
+
+        return (loopPoints, root)
+    }
+}
+
+private extension Data {
+    func ascii(at offset: Int, length: Int) -> String {
+        guard offset >= 0, length >= 0, offset + length <= count else { return "" }
+        return String(decoding: self[offset..<(offset + length)], as: UTF8.self)
+    }
+
+    func uint16BE(at offset: Int) -> UInt16 {
+        guard offset >= 0, offset + 2 <= count else { return 0 }
+        return (UInt16(self[offset]) << 8) | UInt16(self[offset + 1])
+    }
+
+    func uint32BE(at offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else { return 0 }
+        return (UInt32(self[offset]) << 24)
+            | (UInt32(self[offset + 1]) << 16)
+            | (UInt32(self[offset + 2]) << 8)
+            | UInt32(self[offset + 3])
+    }
+
+    func uint32LE(at offset: Int) -> UInt32 {
+        guard offset >= 0, offset + 4 <= count else { return 0 }
+        return UInt32(self[offset])
+            | (UInt32(self[offset + 1]) << 8)
+            | (UInt32(self[offset + 2]) << 16)
+            | (UInt32(self[offset + 3]) << 24)
     }
 }
 

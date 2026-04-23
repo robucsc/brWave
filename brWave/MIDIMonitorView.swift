@@ -87,6 +87,14 @@ struct MIDIMonitorView: View {
 
                 Spacer()
 
+                Button("Device ID") {
+                    // Universal Device Inquiry — response reveals B-Wave identity bytes
+                    // needed to spoof the hardware for SynthTribe routing.
+                    midi.sendRaw([0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7])
+                }
+                .buttonStyle(.bordered)
+                .disabled(midi.selectedDestinationUID == nil)
+
                 Menu {
                     Button("Edit Buffer") { midi.requestEditBuffer() }
                     Divider()

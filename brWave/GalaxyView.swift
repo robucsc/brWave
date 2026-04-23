@@ -52,16 +52,9 @@ struct GalaxyView: View {
     @State private var liveStarY: Double = 0
 
     @AppStorage("brWaveGalaxyDotRadius") private var dotRadius: Double = 1.5
-    @State private var searchText = ""
+    @State private var visibleCategories: Set<String> = GalaxyHierarchy.allCategoryNames
 
-    private var highlightedIDs: Set<NSManagedObjectID> {
-        guard !searchText.isEmpty else { return [] }
-        let q = searchText.lowercased()
-        return Set(patches.filter {
-            ($0.name ?? "").lowercased().contains(q) ||
-            ($0.category ?? "").lowercased().contains(q)
-        }.map(\.objectID))
-    }
+    private var highlightedIDs: Set<NSManagedObjectID> { selectedIDs }
 
     private var isDimming: Bool { selectedIDs.count > 1 || !highlightedIDs.isEmpty }
 
@@ -89,8 +82,6 @@ struct GalaxyView: View {
                 }
 
                 if let hovered = hoveredPatch { hoverTooltip(for: hovered) }
-
-                overlayControls
             }
             .onAppear {
                 DispatchQueue.main.async {
@@ -118,10 +109,22 @@ struct GalaxyView: View {
             value: InspectorBox(
                 id: "galaxy-\(patchSelection.selectedPatch?.objectID.uriRepresentation().absoluteString ?? "empty")",
                 view: AnyView(
-                    GalaxyInspectorPlaceholder(
-                        selectedPatch: patchSelection.selectedPatch,
-                        matchCount: similarMatches.count,
-                        onRefresh: { GalaxyEngine.shared.updateAll(in: context) }
+                    GalaxyInspectorView(
+                        selected: $patchSelection.selectedPatch,
+                        selectedIDs: selectedIDs,
+                        visibleCategories: $visibleCategories,
+                        showConstellations: $showConstellations,
+                        showLabels: $showLabels,
+                        onSearchResult: { ids, first in
+                            selectedIDs = ids
+                            patchSelection.selectedPatch = first ?? patchSelection.selectedPatch
+                        },
+                        sourcePatch: nil,
+                        similarMatches: similarMatches,
+                        onSelectMatch: { p in
+                            selectedIDs = [p.objectID]
+                            patchSelection.selectedPatch = p
+                        }
                     )
                     .environment(\.managedObjectContext, context)
                 )
@@ -187,6 +190,7 @@ struct GalaxyView: View {
         var closest: Patch?
         var closestDist: CGFloat = 20.0 / scale
         for patch in patches {
+            if !visibleCategories.contains(patch.patchCategory.rawValue) { continue }
             let dx = lx - CGFloat(patch.galaxyX * 400)
             let dy = ly - CGFloat(patch.galaxyY * 400)
             let d  = sqrt(dx*dx + dy*dy)
@@ -221,6 +225,7 @@ struct GalaxyView: View {
         var newIDs: Set<NSManagedObjectID> = mods.contains(.command) ? selectedIDs : []
         var first: Patch?
         for patch in patches {
+            if !visibleCategories.contains(patch.patchCategory.rawValue) { continue }
             let vx = center.x + offset.width  + CGFloat(patch.galaxyX * 400) * scale
             let vy = center.y + offset.height + CGFloat(patch.galaxyY * 400) * scale
             if rect.contains(CGPoint(x: vx, y: vy)) {
@@ -242,7 +247,7 @@ struct GalaxyView: View {
         context.stroke(Path(ellipseIn: CGRect(x: -300, y: -300, width: 600, height: 600)),
                        with: .color(Color.white.opacity(0.08)), lineWidth: 1)
 
-        let anchors = GalaxyEngine.shared.anchors
+        let anchors = GalaxyEngine.shared.anchors.filter { visibleCategories.contains($0.category.rawValue) }
 
         if showConstellations {
             context.stroke(Path { p in
@@ -282,6 +287,7 @@ struct GalaxyView: View {
 
         let primary = patchSelection.selectedPatch
         for patch in patches {
+            if !visibleCategories.contains(patch.patchCategory.rawValue) { continue }
             let catColor = patch.patchCategory.color
             let isPrimary  = patch.objectID == primary?.objectID
             let x = isPrimary ? liveStarX : patch.galaxyX * 400
@@ -337,70 +343,6 @@ struct GalaxyView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.2)))
         .position(x: 110, y: 52)
-    }
-
-    // MARK: - Overlay controls
-
-    @ViewBuilder
-    private var overlayControls: some View {
-        VStack {
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search patches…", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .foregroundColor(.white)
-                if !searchText.isEmpty {
-                    Button { searchText = "" } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                    }.buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(.ultraThinMaterial.opacity(0.9))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .frame(maxWidth: 380)
-            .padding(.top, 72)
-
-            Spacer()
-
-            HStack(spacing: 8) {
-                Button {
-                    withAnimation { showConstellations.toggle() }
-                } label: {
-                    Image(systemName: showConstellations ? "network" : "network.slash").padding(8)
-                }
-                .buttonStyle(.bordered).tint(.secondary)
-
-                Button {
-                    withAnimation { showLabels.toggle() }
-                } label: {
-                    Image(systemName: "textformat").padding(8)
-                }
-                .buttonStyle(.bordered).tint(showLabels ? Theme.waveHighlight : .secondary)
-
-                if !selectedIDs.isEmpty {
-                    Text("\(selectedIDs.count) selected")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10).padding(.vertical, 4)
-                        .background(Theme.waveHighlight.opacity(0.75))
-                        .clipShape(Capsule())
-                    Button("Clear") { selectedIDs.removeAll(); patchSelection.selectedPatch = nil }
-                        .buttonStyle(.bordered).tint(.secondary).font(.caption)
-                }
-
-                Spacer()
-
-                HStack(spacing: 6) {
-                    Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(.secondary)
-                    Slider(value: $dotRadius, in: 0.5...5.0, step: 0.25).frame(width: 90).controlSize(.mini)
-                    Image(systemName: "circle.fill").font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-
-                .buttonStyle(.borderedProminent).tint(Theme.waveHighlight).padding(.vertical, 8)
-            }
-            .padding(.horizontal, 16)
-        }
     }
 }
 

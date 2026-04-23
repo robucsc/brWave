@@ -82,6 +82,9 @@ class MIDIController: ObservableObject {
     init() {
         self.globalChannel = UserDefaults.standard.integer(forKey: "brWaveMIDIChannel")
         if self.globalChannel == 0 { self.globalChannel = 1 }
+        if UserDefaults.standard.string(forKey: "wavePanelGroup") == WaveGroup.b.rawValue {
+            incomingGroupTarget = .b
+        }
         setupMIDI()
         refreshEndpoints()
     }
@@ -224,6 +227,90 @@ class MIDIController: ObservableObject {
         DispatchQueue.main.async { self.addLog(direction: .output, data: bytes) }
     }
 
+    // MARK: - Bulk Operations
+
+    @Published var bulkTransferProgress: Double = 0.0
+    @Published var isBulkTransferActive: Bool = false
+    private var bulkTransferWorkItem: DispatchWorkItem?
+
+    /// Sequentially fetches all 200 slots (Bank 0 and Bank 1) from the Behringer Wave.
+    func fetchEntireSynth() {
+        guard !isBulkTransferActive else { return }
+        isBulkTransferActive = true
+        bulkTransferProgress = 0.0
+        
+        let totalSlots = 200
+        var currentSlot = 0
+        
+        func fetchNext() {
+            guard currentSlot < totalSlots, isBulkTransferActive else {
+                isBulkTransferActive = false
+                bulkTransferProgress = 1.0
+                return
+            }
+            
+            let bank = currentSlot / 100
+            let program = currentSlot % 100
+            
+            requestPreset(bank: bank, program: program)
+            
+            bulkTransferProgress = Double(currentSlot) / Double(totalSlots)
+            currentSlot += 1
+            
+            let work = DispatchWorkItem { fetchNext() }
+            bulkTransferWorkItem = work
+            // 60ms gap prevents buffer overflow on the hardware side
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+        }
+        
+        fetchNext()
+    }
+    
+    /// Halt any active bulk transfer
+    func cancelBulkTransfer() {
+        bulkTransferWorkItem?.cancel()
+        isBulkTransferActive = false
+        bulkTransferProgress = 0.0
+    }
+
+    /// Sequentially dumps an array of patches to the synth, starting at Bank 0, Program 0 or a specified target.
+    func sendBankToSynth(patches: [Patch], targetBank: Int = 0, startProgram: Int = 0) {
+        guard !isBulkTransferActive else { return }
+        isBulkTransferActive = true
+        bulkTransferProgress = 0.0
+        
+        let total = patches.count
+        var currentIndex = 0
+        
+        func sendNext() {
+            guard currentIndex < total, isBulkTransferActive else {
+                isBulkTransferActive = false
+                bulkTransferProgress = 1.0
+                return
+            }
+            
+            let patch = patches[currentIndex]
+            if let payload = patch.rawSysexPayload {
+                let slotIndex = startProgram + currentIndex
+                let bank = targetBank + (slotIndex / 100)
+                let program = slotIndex % 100
+                if bank <= 1 { // Only 2 banks available on the Wave
+                    sendPreset(bank: bank, program: program, payload: Array(payload))
+                }
+            }
+            
+            bulkTransferProgress = Double(currentIndex) / Double(total)
+            currentIndex += 1
+            
+            let work = DispatchWorkItem { sendNext() }
+            bulkTransferWorkItem = work
+            // Hardware needs slightly more time to digest memory writes vs reads
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+        }
+        
+        sendNext()
+    }
+
     // MARK: - Receiving
 
     private func processInput(_ pktList: UnsafePointer<MIDIPacketList>) {
@@ -264,6 +351,87 @@ class MIDIController: ObservableObject {
     }
 
     private var nrpnState = NRPNState()
+    private var incomingGroupTarget: IncomingGroupTarget = .a
+
+    private enum IncomingGroupTarget {
+        case a
+        case b
+        case both
+
+        var groups: [WaveGroup] {
+            switch self {
+            case .a:    return [.a]
+            case .b:    return [.b]
+            case .both: return [.a, .b]
+            }
+        }
+    }
+
+    private struct IncomingCCDescriptor {
+        let id: WaveParamID
+        let scaleToRange: Bool
+    }
+
+    /// Wave User Manual, MIDI CCs page: plain CC numbers are their own map.
+    /// Do not infer these from SysEx byte offsets or panel layout positions.
+    private static let incomingCCMap: [Int: IncomingCCDescriptor] = [
+        1:  .init(id: .modWhl,      scaleToRange: false),
+        12: .init(id: .delay,       scaleToRange: false),
+        13: .init(id: .waveshape,   scaleToRange: false),
+        14: .init(id: .rate,        scaleToRange: false),
+        15: .init(id: .attack3,     scaleToRange: false),
+        16: .init(id: .decay3,      scaleToRange: false),
+        17: .init(id: .env3Att,     scaleToRange: false),
+        18: .init(id: .a1,          scaleToRange: false),
+        19: .init(id: .d1,          scaleToRange: false),
+        20: .init(id: .s1,          scaleToRange: false),
+        21: .init(id: .r1,          scaleToRange: false),
+        22: .init(id: .a2,          scaleToRange: false),
+        23: .init(id: .d2,          scaleToRange: false),
+        24: .init(id: .s2,          scaleToRange: false),
+        25: .init(id: .r2,          scaleToRange: false),
+        26: .init(id: .wavesOsc,    scaleToRange: false),
+        27: .init(id: .wavesSub,    scaleToRange: false),
+        28: .init(id: .env1VCF,     scaleToRange: false),
+        29: .init(id: .env2Loud,    scaleToRange: false),
+        30: .init(id: .env1Waves,   scaleToRange: false),
+        71: .init(id: .vcfEmphasis, scaleToRange: false),
+        74: .init(id: .vcfCutoff,   scaleToRange: false),
+    ]
+
+    private static let outgoingCCByParamID: [WaveParamID: Int] = {
+        Dictionary(uniqueKeysWithValues: incomingCCMap.map { ($0.value.id, $0.key) })
+    }()
+
+    /// Send a live edit for one panel parameter. Plain CCs use the same map
+    /// documented for incoming PAR-COM traffic; parameters without a plain CC
+    /// fall back to their documented NRPN number when one exists.
+    func sendParameterChange(id: WaveParamID, value: Int, group: WaveGroup) {
+        guard let desc = WaveParameters.byID[id] else { return }
+        let clamped = min(max(value, desc.range.lowerBound), desc.range.upperBound)
+
+        if case .perGroup = desc.storage {
+            sendControlChange(cc: 31, value: group == .a ? 0 : 1)
+        }
+
+        if let cc = Self.outgoingCCByParamID[id] {
+            sendControlChange(cc: cc, value: clamped)
+        } else if let nrpn = desc.nrpn {
+            sendNRPN(nrpn: nrpn, value: clamped)
+        }
+    }
+
+    func sendControlChange(cc: Int, value: Int, channel: Int? = nil) {
+        guard let dest = getDestination(for: selectedDestinationUID) else { return }
+        let ch = max(0, min(15, (channel ?? globalChannel) - 1))
+        let status = UInt8(0xB0 | ch)
+        let bytes: [UInt8] = [
+            status,
+            UInt8(min(max(cc, 0), 127)),
+            UInt8(min(max(value, 0), 127))
+        ]
+        sendBytes(bytes, to: dest)
+    }
 
     private func processSysExChunk(_ chunk: [UInt8]) {
         if let endIdx = chunk.firstIndex(of: 0xF7) {
@@ -336,14 +504,79 @@ class MIDIController: ObservableObject {
                   let ctx   = patch.managedObjectContext
             else { return }
 
-            // Apply to the active group (default A; UI can override)
-            patch.setValue(result.value, for: desc.id, group: .a)
+            let targetGroups = targetGroups(for: desc.id)
+            for group in targetGroups {
+                patch.setIncomingMIDIValue(result.value, for: desc.id, group: group)
+            }
 
             saveWorkItem?.cancel()
             let work = DispatchWorkItem { try? ctx.save() }
             saveWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+        } else {
+            applyIncomingControlChange(cc: cc, value: val)
         }
+    }
+
+    private func applyIncomingControlChange(cc: Int, value: Int) {
+        guard ![6, 98, 99].contains(cc) else { return }
+
+        if cc == 31 {
+            applyIncomingGroupSelect(value)
+            return
+        }
+
+        guard let incoming = Self.incomingCCMap[cc],
+              let patch = patchSelection?.selectedPatch,
+              let ctx = patch.managedObjectContext
+        else { return }
+
+        let scaled = incoming.scaleToRange ? scaleCCValue(value, for: incoming.id) : value
+        for group in targetGroups(for: incoming.id) {
+            patch.setIncomingMIDIValue(scaled, for: incoming.id, group: group)
+        }
+
+        saveWorkItem?.cancel()
+        let work = DispatchWorkItem { try? ctx.save() }
+        saveWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func applyIncomingGroupSelect(_ value: Int) {
+        switch value {
+        case 0:
+            incomingGroupTarget = .a
+            UserDefaults.standard.set(WaveGroup.a.rawValue, forKey: "wavePanelGroup")
+        case 1:
+            incomingGroupTarget = .b
+            UserDefaults.standard.set(WaveGroup.b.rawValue, forKey: "wavePanelGroup")
+        case 2:
+            incomingGroupTarget = .both
+        default:
+            return
+        }
+    }
+
+    private func targetGroups(for id: WaveParamID) -> [WaveGroup] {
+        guard let desc = WaveParameters.byID[id] else { return activePanelGroups() }
+        if case .shared = desc.storage { return [.a] }
+        return incomingGroupTarget.groups
+    }
+
+    private func activePanelGroups() -> [WaveGroup] {
+        guard let raw = UserDefaults.standard.string(forKey: "wavePanelGroup"),
+              let group = WaveGroup(rawValue: raw) else {
+            return [.a]
+        }
+        return [group]
+    }
+
+    private func scaleCCValue(_ value: Int, for id: WaveParamID) -> Int {
+        guard let range = WaveParameters.byID[id]?.range else { return value }
+        let clamped = min(max(value, 0), 127)
+        if range == 0...127 { return clamped }
+        let span = range.upperBound - range.lowerBound
+        return range.lowerBound + Int((Double(clamped) / 127.0 * Double(span)).rounded())
     }
 
     // MARK: - Log helpers

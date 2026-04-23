@@ -9,6 +9,7 @@
 //
 
 import CoreData
+import Foundation
 
 // MARK: - Patch
 
@@ -46,6 +47,7 @@ extension Patch {
         var pv = WavePatchValues()
         // Shared params
         pv.setValue(parsed.wavetb, for: .wavetb, group: .a)
+        pv.setValue(parsed.wavetb, for: .wavetb, group: .b)
         pv.setValue(parsed.split,  for: .split,  group: .a)
         pv.setValue(parsed.keyb,   for: .keyb,   group: .a)
         // Per-group
@@ -96,6 +98,29 @@ extension Patch {
             name: .waveParameterChanged, object: self,
             userInfo: ["id": id, "old": old, "new": value, "group": group]
         )
+
+        if let context = managedObjectContext, context.hasChanges {
+            context.perform {
+                try? context.save()
+            }
+        }
+    }
+
+    /// Fast live-MIDI update path. Hardware control streams can send dozens of
+    /// values per second, so do not register undo or save on every tick here.
+    func setIncomingMIDIValue(_ value: Int, for id: WaveParamID, group: WaveGroup = .a) {
+        let old = self.value(for: id, group: group)
+        guard old != value else { return }
+
+        var pv = patchValues
+        pv.setValue(value, for: id, group: group)
+        patchValues = pv
+        dateModified = Date()
+
+        NotificationCenter.default.post(
+            name: .waveParameterChanged, object: self,
+            userInfo: ["id": id, "old": old, "new": value, "group": group]
+        )
     }
 
     /// Raw 121-byte preset payload for lossless SysEx round-trip.
@@ -112,6 +137,29 @@ extension Patch {
     /// Build an edit buffer SysEx (immediate playback, no slot save).
     func toEditBufferSysEx() -> [UInt8] {
         WaveSysExParser.dumpToEditBuffer(payload: rawBytes)
+    }
+
+    /// Copy the full stored patch state into another Patch entity.
+    func copyStoredState(from src: Patch,
+                         nameOverride: String? = nil,
+                         preserveUUID: Bool = false) {
+        if preserveUUID {
+            uuid = src.uuid
+        } else if uuid == nil {
+            uuid = UUID()
+        }
+
+        name            = nameOverride ?? src.name
+        designer        = src.designer
+        bank            = src.bank
+        program         = src.program
+        category        = src.category
+        isFavorite      = src.isFavorite
+        isTrashed       = src.isTrashed
+        rawSysexPayload = src.rawSysexPayload
+        values          = src.values
+        dateCreated     = src.dateCreated ?? Date()
+        dateModified    = Date()
     }
 }
 
@@ -191,4 +239,39 @@ extension PatchSlot {
     /// Wave: 2 banks × 100 programs. Position = bank * 100 + program (0–199).
     var bankIndex: Int    { Int(position) / 100 }
     var programIndex: Int { Int(position) % 100 }
+}
+
+// MARK: - Import naming / metadata helpers
+
+/// Reduce imported names to printable ASCII so they survive Behringer SysEx round-trips.
+func sanitizedImportName(_ raw: String, fallback: String = "Untitled") -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    let ascii = trimmed.unicodeScalars
+        .map { (32...126).contains(Int($0.value)) ? Character($0) : " " }
+    let collapsed = String(ascii)
+        .split(separator: " ", omittingEmptySubsequences: true)
+        .joined(separator: " ")
+        .trimmingCharacters(in: .whitespaces)
+
+    return collapsed.isEmpty ? fallback : collapsed
+}
+
+/// Apply a compact source suffix (`3`, `8`, `u`) and optional lossy marker (`<`).
+func importName(_ raw: String, sourceMarker: String? = nil, degraded: Bool = false,
+                fallback: String = "Untitled") -> String {
+    let base = sanitizedImportName(raw, fallback: fallback)
+    let suffix = (sourceMarker ?? "") + (degraded ? "<" : "")
+    guard !suffix.isEmpty else { return String(base.prefix(16)) }
+
+    let clippedBase = String(base.prefix(max(0, 16 - suffix.count)))
+        .trimmingCharacters(in: .whitespaces)
+    let merged = clippedBase + suffix
+    return String(merged.prefix(16))
+}
+
+func importDesigner(source: String, fileName: String? = nil, extra: String? = nil) -> String {
+    var parts = [source]
+    if let fileName, !fileName.isEmpty { parts.append(fileName) }
+    if let extra, !extra.isEmpty { parts.append(extra) }
+    return parts.joined(separator: " | ")
 }

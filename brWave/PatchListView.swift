@@ -241,10 +241,17 @@ private struct EntityPatchList: View {
             VStack { Spacer(); emptyMessage; Spacer() }
         } else {
             ScrollViewReader { proxy in
-                List(filtered, id: \.objectID) { patch in
-                    PatchEntityRow(patch: patch,
-                                   isSelected: patchSelection.selectedPatch?.objectID == patch.objectID,
-                                   inTrash: inTrash)
+                List {
+                    ForEach(filtered, id: \.objectID) { patch in
+                    PatchEntityRow(
+                        patch: patch,
+                        isSelected: patchSelection.selectedPatch?.objectID == patch.objectID,
+                        inTrash: inTrash,
+                        onSelect: {
+                            patchSelection.selectedPatch = patch
+                            withAnimation { proxy.scrollTo(patch.objectID, anchor: .center) }
+                        }
+                    )
                         .id(patch.objectID)
                         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
                         .listRowSeparator(.hidden)
@@ -253,7 +260,7 @@ private struct EntityPatchList: View {
                                 ? Theme.waveHighlight.opacity(0.15)
                                 : Color.clear
                         )
-                        .onTapGesture { patchSelection.selectedPatch = patch }
+                    }
                 }
                 .listStyle(.plain)
                 .scrollIndicators(.hidden)
@@ -325,9 +332,17 @@ private struct LibraryPatchList: View {
             }
         } else {
             ScrollViewReader { proxy in
-                List(slots, id: \.objectID) { slot in
-                    SlotPatchRow(slot: slot,
-                                 isSelected: patchSelection.selectedPatch?.objectID == slot.patch?.objectID)
+                List {
+                    ForEach(slots, id: \.objectID) { slot in
+                    SlotPatchRow(
+                        slot: slot,
+                        isSelected: patchSelection.selectedPatch?.objectID == slot.patch?.objectID,
+                        onSelect: {
+                            guard let patch = slot.patch else { return }
+                            patchSelection.selectedPatch = patch
+                            withAnimation { proxy.scrollTo(slot.objectID, anchor: .center) }
+                        }
+                    )
                         .id(slot.objectID)
                         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
                         .listRowSeparator(.hidden)
@@ -336,14 +351,12 @@ private struct LibraryPatchList: View {
                                 ? Theme.waveHighlight.opacity(0.15)
                                 : Color.clear
                         )
-                        .onTapGesture {
-                            if let patch = slot.patch { patchSelection.selectedPatch = patch }
-                        }
                         .contextMenu {
                             if let patch = slot.patch {
                                 PatchContextMenuItems(patch: patch, inTrash: false)
                             }
                         }
+                    }
                 }
                 .listStyle(.plain)
                 .scrollIndicators(.hidden)
@@ -363,36 +376,41 @@ private struct PatchEntityRow: View {
     @ObservedObject var patch: Patch
     let isSelected: Bool
     let inTrash: Bool
+    let onSelect: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(Theme.waveHighlight.opacity(0.7))
-                .frame(width: 7, height: 7)
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Theme.waveHighlight.opacity(0.7))
+                    .frame(width: 7, height: 7)
 
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(patch.name ?? "Untitled")
-                        .font(.system(size: 12))
-                        .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
-                        .lineLimit(1)
-                    Spacer(minLength: 2)
-                    if patch.isFavorite && !inTrash {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Theme.waveHighlight)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(patch.name ?? "Untitled")
+                            .font(.system(size: 12))
+                            .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 2)
+                        if patch.isFavorite && !inTrash {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.waveHighlight)
+                        }
+                    }
+                    if let designer = patch.designer, !designer.isEmpty {
+                        Text(designer)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .tracking(0.3)
+                            .lineLimit(1)
                     }
                 }
-                if let designer = patch.designer, !designer.isEmpty {
-                    Text(designer)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .tracking(0.3)
-                        .lineLimit(1)
-                }
             }
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 3)
+        .buttonStyle(.plain)
         .contextMenu { PatchContextMenuItems(patch: patch, inTrash: inTrash) }
     }
 }
@@ -402,34 +420,46 @@ private struct PatchEntityRow: View {
 private struct SlotPatchRow: View {
     let slot: PatchSlot
     let isSelected: Bool
+    let onSelect: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(Theme.waveHighlight.opacity(0.7))
-                .frame(width: 7, height: 7)
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Theme.waveHighlight.opacity(0.7))
+                    .frame(width: 7, height: 7)
 
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(slot.patch?.name ?? "Untitled")
-                        .font(.system(size: 12))
-                        .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
-                        .lineLimit(1)
-                    Spacer(minLength: 2)
-                    if slot.patch?.isFavorite == true {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Theme.waveHighlight)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(slot.patch?.name ?? "Untitled")
+                            .font(.system(size: 12))
+                            .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
+                            .lineLimit(1)
+                        Spacer(minLength: 2)
+                        if slot.patch?.isFavorite == true {
+                            Image(systemName: "star.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Theme.waveHighlight)
+                        }
+                        if let initials = designerInitials {
+                            Text(initials)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(isSelected ? Theme.waveHighlight.opacity(0.7) : .secondary)
+                        }
                     }
-                    if let initials = designerInitials {
-                        Text(initials)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(isSelected ? Theme.waveHighlight.opacity(0.7) : .secondary)
+                    if let designer = slot.patch?.designer, !designer.isEmpty {
+                        Text(designer)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .tracking(0.3)
+                            .lineLimit(1)
                     }
                 }
             }
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 3)
+        .buttonStyle(.plain)
     }
 
     private var designerInitials: String? {
