@@ -11,6 +11,8 @@ xcuserdata/
 # Build products
 build/
 DerivedData/
+.derived/
+.deriveddata/
 
 # Swift Package Manager
 .build/
