@@ -17,7 +17,7 @@ import AppKit
 private struct WavePanelResizeHandleView: NSViewRepresentable {
     let panelID: String
     let naturalSize: CGSize
-    let layoutService: WavePanelLayoutService
+    let layoutService: PanelLayoutService
 
     func makeCoordinator() -> Coordinator {
         Coordinator(panelID: panelID, layoutService: layoutService)
@@ -38,7 +38,7 @@ private struct WavePanelResizeHandleView: NSViewRepresentable {
 
     final class Coordinator {
         let panelID: String
-        let layoutService: WavePanelLayoutService
+        let layoutService: PanelLayoutService
         var naturalSize: CGSize = .zero
         private var dragStartSize: CGSize = .zero
         private var liveDragSize: CGSize = .zero
@@ -47,7 +47,7 @@ private struct WavePanelResizeHandleView: NSViewRepresentable {
         private var monitor: Any?
         let handleView = NSView()
 
-        init(panelID: String, layoutService: WavePanelLayoutService) {
+        init(panelID: String, layoutService: PanelLayoutService) {
             self.panelID = panelID
             self.layoutService = layoutService
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]) {
@@ -64,7 +64,7 @@ private struct WavePanelResizeHandleView: NSViewRepresentable {
             case .leftMouseDown where over:
                 if event.clickCount == 2 {
                     DispatchQueue.main.async {
-                        self.layoutService.resetSectionSize(self.panelID)
+                        self.layoutService.removePanelFrame(self.panelID)
                     }
                 } else {
                     dragStartSize = layoutService.size(for: panelID) ?? naturalSize
@@ -114,7 +114,7 @@ struct WavePanelView: View {
     @State private var zoomScale: CGFloat = 1.0
     @State private var lastZoom: CGFloat = 1.0
     @State private var isPinching = false
-    @State private var naturalContentSize: CGSize = .zero
+    @State private var headerAreaHeight: CGFloat = 0
     @State private var zoomAnchor: UnitPoint = .center
     @State private var lastMouseLocation: CGPoint = .zero
     @State private var pitchWheelValue: Double = 0
@@ -125,7 +125,7 @@ struct WavePanelView: View {
     @State private var selectedWavetableHandle: WaveWavetableHandle = .osc
     @FocusState private var panelEditorFocused: Bool
 
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -136,31 +136,31 @@ struct WavePanelView: View {
                     headerRow
                         .padding(.horizontal, 20)
                         .padding(.bottom, 16)
+                        .background(GeometryReader { geo in
+                            Color.clear.onAppear { headerAreaHeight = geo.size.height }
+                        })
 
                     panelCanvas
                         .padding(.horizontal, 20)
                         .padding(.bottom, 30)
                 }
-                .background(GeometryReader { geo in
-                    Color.clear.onAppear {
-                        if naturalContentSize == .zero { naturalContentSize = geo.size }
-                    }
-                })
                 .frame(
-                    width:  naturalContentSize == .zero ? nil : naturalContentSize.width,
-                    height: naturalContentSize == .zero ? nil : naturalContentSize.height
+                    width:  dynamicContentSize == .zero ? nil : dynamicContentSize.width,
+                    height: dynamicContentSize == .zero ? nil : dynamicContentSize.height,
+                    alignment: .topLeading
                 )
                 .coordinateSpace(name: "wavePanel")
                 .scaleEffect(zoomScale, anchor: zoomAnchor)
                 .frame(
-                    width:  naturalContentSize == .zero ? nil : naturalContentSize.width  * zoomScale,
-                    height: naturalContentSize == .zero ? nil : naturalContentSize.height * zoomScale
+                    width:  dynamicContentSize == .zero ? nil : dynamicContentSize.width  * zoomScale,
+                    height: dynamicContentSize == .zero ? nil : dynamicContentSize.height * zoomScale
                 )
             }
             .scrollDisabled(false)
             .scrollIndicators(.hidden)
             .focusable()
             .focused($panelEditorFocused)
+            .focusEffectDisabled()
             .onPreferenceChange(NudgeFrameKey.self) { frames in
                 DispatchQueue.main.async {
                     for (id, frame) in frames { canonicalLayoutService.reportFrame(id, frame) }
@@ -178,8 +178,8 @@ struct WavePanelView: View {
                     .onChanged { val in
                         if !isPinching {
                             isPinching = true
-                            let w = max(1, naturalContentSize.width  * zoomScale)
-                            let h = max(1, naturalContentSize.height * zoomScale)
+                            let w = max(1, dynamicContentSize.width  * zoomScale)
+                            let h = max(1, dynamicContentSize.height * zoomScale)
                             zoomAnchor = UnitPoint(
                                 x: max(0, min(1, lastMouseLocation.x / w)),
                                 y: max(0, min(1, lastMouseLocation.y / h))
@@ -200,8 +200,7 @@ struct WavePanelView: View {
                     TuningSelectionInfo()
                 }
                 .padding(.top, 56)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .allowsHitTesting(true)
+                .frame(maxWidth: .infinity, alignment: .top)
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(100)
             }
@@ -252,6 +251,7 @@ struct WavePanelView: View {
             panelSection("Pitch Env", fallback: defaultPanelFrame(for: "Pitch Env")) { pitchEnvSection }
             panelSection("Routing", fallback: defaultPanelFrame(for: "Routing")) { routingSection }
             panelSection("Performance", fallback: defaultPanelFrame(for: "Performance")) { performanceSection }
+            panelSection("Voice Tuning", fallback: defaultPanelFrame(for: "Voice Tuning")) { voiceTuningSection }
         }
         .frame(width: panelCanvasSize.width, height: panelCanvasSize.height, alignment: .topLeading)
     }
@@ -271,23 +271,16 @@ struct WavePanelView: View {
     }
 
     private func resolvedPanelFrame(for title: String, fallback: CGRect) -> CGRect {
-        guard let stored = canonicalLayoutService.panelFrame(for: title) else {
-            if let legacySize = canonicalLayoutService.size(for: title) {
-                let minimum = sectionMinimumSize(for: title)
-                return CGRect(
-                    origin: fallback.origin,
-                    size: CGSize(
-                        width: max(minimum.width, legacySize.width),
-                        height: max(minimum.height, legacySize.height)
-                    )
-                )
-            }
-            return fallback
-        }
-        let minimum = sectionMinimumSize(for: title)
-        let width = max(minimum.width, stored.width > 0 ? stored.width : fallback.width)
-        let height = max(minimum.height, stored.height > 0 ? stored.height : fallback.height)
+        guard let stored = canonicalLayoutService.panelFrame(for: title) else { return fallback }
+        let width  = stored.width  > 0 ? stored.width  : fallback.width
+        let height = stored.height > 0 ? stored.height : fallback.height
         return CGRect(origin: stored.origin, size: CGSize(width: width, height: height))
+    }
+
+    private var dynamicContentSize: CGSize {
+        let canvas = panelCanvasSize
+        guard canvas != .zero, headerAreaHeight > 0 else { return .zero }
+        return CGSize(width: canvas.width + 40, height: headerAreaHeight + canvas.height + 30)
     }
 
     private var panelCanvasSize: CGSize {
@@ -300,7 +293,8 @@ struct WavePanelView: View {
             resolvedPanelFrame(for: "Amp Env", fallback: defaultPanelFrame(for: "Amp Env")),
             resolvedPanelFrame(for: "Pitch Env", fallback: defaultPanelFrame(for: "Pitch Env")),
             resolvedPanelFrame(for: "Routing", fallback: defaultPanelFrame(for: "Routing")),
-            resolvedPanelFrame(for: "Performance", fallback: defaultPanelFrame(for: "Performance"))
+            resolvedPanelFrame(for: "Performance", fallback: defaultPanelFrame(for: "Performance")),
+            resolvedPanelFrame(for: "Voice Tuning", fallback: defaultPanelFrame(for: "Voice Tuning"))
         ]
         let maxX = frames.map(\.maxX).max() ?? 0
         let maxY = frames.map(\.maxY).max() ?? 0
@@ -309,47 +303,17 @@ struct WavePanelView: View {
 
     private func defaultPanelFrame(for title: String) -> CGRect {
         switch title {
-        case "LFO":
-            return CGRect(x: 0, y: 0, width: 220, height: 204)
-        case "Modulation":
-            return CGRect(x: 240, y: 0, width: 220, height: 134)
-        case "Waves":
-            return CGRect(x: 480, y: 0, width: 275, height: 614)
-        case "Wheels":
-            return CGRect(x: 0, y: 224, width: 120, height: 314)
-        case "Filter · Wave Env":
-            return CGRect(x: 140, y: 224, width: 520, height: 258)
-        case "Amp Env":
-            return CGRect(x: 140, y: 502, width: 520, height: 258)
-        case "Pitch Env":
-            return CGRect(x: 680, y: 224, width: 520, height: 258)
-        case "Routing":
-            return CGRect(x: 680, y: 502, width: 520, height: 264)
-        case "Performance":
-            return CGRect(x: 1220, y: 224, width: 380, height: 334)
-        default:
-            return CGRect(x: 0, y: 0, width: 160, height: 120)
-        }
-    }
-
-    private func sectionMinimumSize(for title: String) -> CGSize {
-        switch title {
-        case "LFO":
-            return CGSize(width: 160, height: 130)
-        case "Modulation":
-            return CGSize(width: 160, height: 100)
-        case "Waves":
-            return CGSize(width: 240, height: 360)
-        case "Wheels":
-            return CGSize(width: 90, height: 180)
-        case "Filter · Wave Env", "Amp Env", "Pitch Env":
-            return CGSize(width: 320, height: 140)
-        case "Routing":
-            return CGSize(width: 320, height: 160)
-        case "Performance":
-            return CGSize(width: 280, height: 220)
-        default:
-            return CGSize(width: 120, height: 80)
+        case "LFO":              return CGRect(x: 0,    y: 0,   width: 220, height: 547)
+        case "Modulation":       return CGRect(x: 240,  y: 0,   width: 141, height: 547)
+        case "Waves":            return CGRect(x: 419,  y: 0,   width: 306, height: 547)
+        case "Wheels":           return CGRect(x: 0,    y: 567, width: 121, height: 500)
+        case "Filter · Wave Env":return CGRect(x: 141,  y: 567, width: 518, height: 295)
+        case "Amp Env":          return CGRect(x: 141,  y: 882, width: 518, height: 185)
+        case "Pitch Env":        return CGRect(x: 679,  y: 567, width: 517, height: 160)
+        case "Routing":          return CGRect(x: 679,  y: 748, width: 520, height: 321)
+        case "Performance":      return CGRect(x: 746,  y: 0,   width: 260, height: 547)
+        case "Voice Tuning":     return CGRect(x: 1047, y: 0,   width: 172, height: 547)
+        default:                 return CGRect(x: 0,    y: 0,   width: 160, height: 120)
         }
     }
 
@@ -830,21 +794,27 @@ struct WavePanelView: View {
         }
     }
 
-    /// Oscillator config, bender, tuning, and voice semitone offsets.
+    /// Oscillator config, bender, and tuning.
     private var performanceSection: some View {
         WavePanelSection(title: "Performance", resetIDs: [
             WaveParamID.uw.rawValue, WaveParamID.sw.rawValue,
             WaveParamID.bd.rawValue, WaveParamID.bi.rawValue,
             WaveParamID.detu.rawValue, WaveParamID.eo.rawValue,
-            WaveParamID.mo.rawValue, WaveParamID.ms.rawValue, WaveParamID.es.rawValue,
-            WaveParamID.semitV1.rawValue, WaveParamID.semitV2.rawValue, WaveParamID.semitV3.rawValue, WaveParamID.semitV4.rawValue,
-            WaveParamID.semitV5.rawValue, WaveParamID.semitV6.rawValue, WaveParamID.semitV7.rawValue, WaveParamID.semitV8.rawValue
+            WaveParamID.mo.rawValue, WaveParamID.ms.rawValue, WaveParamID.es.rawValue
         ]) {
             WaveSectionCanvas(height: 320) {
-                Text("OSCILLATOR").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3)).position(x: 44, y: 8)
-                Text("BENDER").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3)).position(x: 132, y: 8)
-                Text("TUNING").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3)).position(x: 222, y: 8)
-                Text("VOICE TUNING").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3)).position(x: 320, y: 8)
+                WaveControlSlot(id: "perf.label.oscillator", sectionID: "Performance", naturalFrame: CGRect(x: 16, y: 2, width: 60, height: 12)) {
+                    Text("OSCILLATOR").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3))
+                        .nudgeable(id: "perf.label.oscillator", controlType: .label)
+                }
+                WaveControlSlot(id: "perf.label.bender", sectionID: "Performance", naturalFrame: CGRect(x: 104, y: 2, width: 50, height: 12)) {
+                    Text("BENDER").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3))
+                        .nudgeable(id: "perf.label.bender", controlType: .label)
+                }
+                WaveControlSlot(id: "perf.label.tuning", sectionID: "Performance", naturalFrame: CGRect(x: 182, y: 2, width: 44, height: 12)) {
+                    Text("TUNING").font(.system(size: 8, weight: .bold)).tracking(0.8).foregroundStyle(Color.white.opacity(0.3))
+                        .nudgeable(id: "perf.label.tuning", controlType: .label)
+                }
 
                 WaveControlSlot(id: WaveParamID.uw.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 0, y: 18, width: 86, height: 120)) {
                     WaveLEDRadio(patch: patch, id: .uw, options: ["128", "2048", "8192"], label: "Upper WT")
@@ -869,15 +839,27 @@ struct WavePanelView: View {
                 WaveControlSlot(id: WaveParamID.mo.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 172, y: 192, width: 68, height: 34)) { WaveLEDToggle(patch: patch, id: .mo, label: "M→Main") }
                 WaveControlSlot(id: WaveParamID.ms.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 172, y: 228, width: 68, height: 34)) { WaveLEDToggle(patch: patch, id: .ms, label: "M→Sub") }
                 WaveControlSlot(id: WaveParamID.es.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 172, y: 264, width: 68, height: 34)) { WaveLEDToggle(patch: patch, id: .es, label: "E3→Sub") }
+            }
+        }
+    }
 
-                WaveControlSlot(id: WaveParamID.semitV1.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 250, y: 18, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV1, size: Theme.knobSizeMini, labelOverride: "V1") }
-                WaveControlSlot(id: WaveParamID.semitV2.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 306, y: 18, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV2, size: Theme.knobSizeMini, labelOverride: "V2") }
-                WaveControlSlot(id: WaveParamID.semitV3.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 250, y: 104, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV3, size: Theme.knobSizeMini, labelOverride: "V3") }
-                WaveControlSlot(id: WaveParamID.semitV4.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 306, y: 104, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV4, size: Theme.knobSizeMini, labelOverride: "V4") }
-                WaveControlSlot(id: WaveParamID.semitV5.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 250, y: 190, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV5, size: Theme.knobSizeMini, labelOverride: "V5") }
-                WaveControlSlot(id: WaveParamID.semitV6.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 306, y: 190, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV6, size: Theme.knobSizeMini, labelOverride: "V6") }
-                WaveControlSlot(id: WaveParamID.semitV7.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 250, y: 276, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV7, size: Theme.knobSizeMini, labelOverride: "V7") }
-                WaveControlSlot(id: WaveParamID.semitV8.rawValue, sectionID: "Performance", naturalFrame: CGRect(x: 306, y: 276, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV8, size: Theme.knobSizeMini, labelOverride: "V8") }
+    /// Per-voice semitone offsets (V1–V8).
+    private var voiceTuningSection: some View {
+        WavePanelSection(title: "Voice Tuning", resetIDs: [
+            WaveParamID.semitV1.rawValue, WaveParamID.semitV2.rawValue,
+            WaveParamID.semitV3.rawValue, WaveParamID.semitV4.rawValue,
+            WaveParamID.semitV5.rawValue, WaveParamID.semitV6.rawValue,
+            WaveParamID.semitV7.rawValue, WaveParamID.semitV8.rawValue
+        ]) {
+            WaveSectionCanvas(height: 370) {
+                WaveControlSlot(id: WaveParamID.semitV1.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 0,  y: 18,  width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV1, size: Theme.knobSizeMini, labelOverride: "V1") }
+                WaveControlSlot(id: WaveParamID.semitV2.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 56, y: 18,  width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV2, size: Theme.knobSizeMini, labelOverride: "V2") }
+                WaveControlSlot(id: WaveParamID.semitV3.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 0,  y: 104, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV3, size: Theme.knobSizeMini, labelOverride: "V3") }
+                WaveControlSlot(id: WaveParamID.semitV4.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 56, y: 104, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV4, size: Theme.knobSizeMini, labelOverride: "V4") }
+                WaveControlSlot(id: WaveParamID.semitV5.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 0,  y: 190, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV5, size: Theme.knobSizeMini, labelOverride: "V5") }
+                WaveControlSlot(id: WaveParamID.semitV6.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 56, y: 190, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV6, size: Theme.knobSizeMini, labelOverride: "V6") }
+                WaveControlSlot(id: WaveParamID.semitV7.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 0,  y: 276, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV7, size: Theme.knobSizeMini, labelOverride: "V7") }
+                WaveControlSlot(id: WaveParamID.semitV8.rawValue, sectionID: "Voice Tuning", naturalFrame: CGRect(x: 56, y: 276, width: 52, height: 86)) { WaveKnobControl(patch: patch, id: .semitV8, size: Theme.knobSizeMini, labelOverride: "V8") }
             }
         }
     }
@@ -957,7 +939,7 @@ private struct WaveWavetableEntryStrip: View {
                     .fill(Color.black.opacity(0.28))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Theme.xrAccentBlue.opacity(0.34), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
                     )
 
                 Canvas { ctx, size in
@@ -1442,7 +1424,7 @@ private struct WaveStaticKnob: View {
     let valueText: String
     var size: CGFloat = Theme.knobSizeMedium
     var nudgeID: String? = nil
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
 
     var body: some View {
         let knobSize = canonicalLayoutService.knobSize(for: nudgeID ?? title) ?? size
@@ -2008,7 +1990,7 @@ private struct WaveLFOGraphic: View {
             let size = geo.size
             Canvas { context, _ in
                 let rect = CGRect(origin: .zero, size: size).insetBy(dx: 4, dy: 4)
-                context.stroke(Path(roundedRect: rect, cornerRadius: 6), with: .color(Theme.xrAccentBlue.opacity(0.16)), lineWidth: 1)
+                context.stroke(Path(roundedRect: rect, cornerRadius: 6), with: .color(Color.white.opacity(0.06)), lineWidth: 1)
                 let delayFraction = CGFloat(delay) / 127
                 let delayX = rect.minX + rect.width * delayFraction * 0.45
 
@@ -2173,7 +2155,7 @@ struct WavePanelSection<Content: View>: View {
 
     private let accent = Theme.xrHeaderBackground
     @Environment(\.isTuningMode) private var isTuningMode
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
     @State private var currentNaturalSize: CGSize = .zero
     @State private var panelDragOrigin: CGPoint?
 
@@ -2381,7 +2363,7 @@ private struct WaveControlSlot<Content: View>: View {
     let naturalFrame: CGRect
     @ViewBuilder let content: () -> Content
 
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
 
     var body: some View {
         let frame = canonicalLayoutService.displayFrame(for: id, in: sectionID, fallback: naturalFrame)
@@ -2396,7 +2378,7 @@ private struct WaveControlSlot<Content: View>: View {
 }
 
 struct TuningSelectionInfo: View {
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
 
     var body: some View {
         let ids = Array(canonicalLayoutService.selectedIDs)
@@ -2437,7 +2419,7 @@ struct TuningSelectionInfo: View {
 
                 Divider().frame(height: 20)
                 Button("Reset Size") {
-                    canonicalLayoutService.resetSectionSize(sectionID)
+                    canonicalLayoutService.removePanelFrame(sectionID)
                 }
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.waveHighlight)

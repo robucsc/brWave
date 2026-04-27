@@ -14,6 +14,13 @@ struct brWaveApp: App {
     @StateObject private var bankEditorState = BankEditorState()
     @StateObject private var patchSelection  = PatchSelection()
 
+    init() {
+        UserDefaults.standard.register(defaults: [
+            "importSkipInitPatches":      true,
+            "importDeduplicateOnImport":  true
+        ])
+    }
+
     // UndoService needs the window's UndoManager — bridged via UndoManagerBridge
     @State private var undoService = UndoService(undoManager: nil)
 
@@ -43,7 +50,7 @@ struct brWaveApp: App {
             let patches = slots.compactMap(\.patch)
             guard !patches.isEmpty else { return nil }
 
-            let baseName = library.name ?? "Library"
+            let baseName = library.name ?? "Set"
             let suggestedName = bankIndex.map { "\(baseName)_Bank\($0)" } ?? baseName
             return (patches, suggestedName)
 
@@ -176,6 +183,82 @@ struct brWaveApp: App {
         if !fxpURLs.isEmpty { WaldorfImporter.importFXP(urls: fxpURLs, into: context) }
     }
 
+    /// Resolve the patches to operate on, respecting (in priority order):
+    /// 1. Multi-selection in bank view (selectedIDs)
+    /// 2. Current library + bank from patchListMode
+    /// 3. All non-trashed patches
+    @MainActor
+    private func patchesInScope(context: NSManagedObjectContext) -> [Patch] {
+        // 1. Explicit multi-selection
+        let ids = patchSelection.selectedIDs
+        if ids.count > 1 {
+            let req: NSFetchRequest<Patch> = Patch.fetchRequest()
+            req.predicate = NSPredicate(format: "self IN %@", ids)
+            return (try? context.fetch(req)) ?? []
+        }
+        // 2. Current library view
+        if let export = exportSelection(context: context) { return export.patches }
+        // 3. Everything
+        let req: NSFetchRequest<Patch> = Patch.fetchRequest()
+        req.predicate = NSPredicate(format: "isTrashed == NO OR isTrashed == nil")
+        return (try? context.fetch(req)) ?? []
+    }
+
+    @MainActor
+    private func sortScope(by criterion: PatchSortCriterion, context: NSManagedObjectContext) {
+        // Library mode: work directly with the library's own slots so we never touch
+        // slots in other libraries that happen to contain the same patches.
+        if case .library(let libraryID, let bankIndex) = bankEditorState.patchListMode {
+            let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
+            req.predicate = NSPredicate(format: "uuid == %@", libraryID as CVarArg)
+            req.fetchLimit = 1
+            guard let library = try? context.fetch(req).first else { return }
+
+            var slots = library.slotsArray.filter { $0.patch != nil && $0.patch?.isTrashed != true }
+            if let b = bankIndex {
+                slots = slots.filter { Int($0.position) >= b * 100 && Int($0.position) <= b * 100 + 99 }
+            }
+            guard slots.count > 1 else { return }
+
+            let patches = slots.compactMap(\.patch)
+            let sorted  = PatchSorter.ordered(patches, by: criterion)
+            let startPos = slots.map { Int($0.position) }.min() ?? 0
+
+            // Build a map from patch → its slot within this library only.
+            var slotsByPatch = [NSManagedObjectID: PatchSlot]()
+            for slot in slots {
+                if let p = slot.patch { slotsByPatch[p.objectID] = slot }
+            }
+            for (index, patch) in sorted.enumerated() {
+                slotsByPatch[patch.objectID]?.position = Int16(startPos + index)
+            }
+            try? context.save()
+            return
+        }
+
+        // Non-library modes (selection, all patches): use slot lookup with multi-library awareness.
+        let patches = patchesInScope(context: context)
+        guard !patches.isEmpty else { return }
+        let start = patches.compactMap { p -> Int? in
+            let req: NSFetchRequest<PatchSlot> = PatchSlot.fetchRequest()
+            req.predicate = NSPredicate(format: "patch == %@", p)
+            req.fetchLimit = 1
+            return (try? context.fetch(req).first).map { Int($0.position) }
+        }.min() ?? 0
+        PatchSorter.sort(patches, by: criterion, startPosition: start, in: context)
+    }
+
+    @MainActor
+    private func removeDuplicatesInScope(context: NSManagedObjectContext) {
+        let patches = patchesInScope(context: context)
+        guard !patches.isEmpty else { return }
+        let removed = SimilarityEngine.removeDuplicates(from: patches, in: context)
+        guard removed > 0 else { return }
+        try? context.save()
+        // Brief console confirmation — could surface in UI later
+        print("brWave: removed \(removed) exact duplicate\(removed == 1 ? "" : "s")")
+    }
+
     @MainActor
     private func exportAllFXB(context: NSManagedObjectContext) {
         guard let export = exportSelection(context: context) else { return }
@@ -223,6 +306,9 @@ struct brWaveApp: App {
                 .onAppear {
                     DispatchQueue.main.async {
                         MIDIController.shared.wire(to: patchSelection)
+                        let ctx = persistenceController.container.viewContext
+                        let count = FactoryPatchNames.buildVectorRegistry(from: ctx)
+                        if count > 0 { print("brWave: factory vector registry built — \(count) anchors") }
                     }
                 }
                 .environment(\.managedObjectContext, persistenceController.container.viewContext)
@@ -267,6 +353,57 @@ struct brWaveApp: App {
 
             CommandGroup(replacing: .importExport) { }
 
+            CommandMenu("Patch") {
+                Button("Send to Edit Buffer") {
+                    guard let patch = patchSelection.selectedPatch else { return }
+                    MIDIController.shared.sendToEditBuffer(payload: patch.rawBytes)
+                }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(patchSelection.selectedPatch == nil)
+
+                Divider()
+
+                Button("Replicate") {
+                    NotificationCenter.default.post(name: .replicatePatch, object: patchSelection.selectedPatch)
+                }
+                .keyboardShortcut("d", modifiers: [.command, .option])
+                .disabled(patchSelection.selectedPatch == nil)
+
+                Divider()
+
+                Menu("Category") {
+                    ForEach(PatchCategory.allCases) { cat in
+                        Button(cat.rawValue) {
+                            guard let patch = patchSelection.selectedPatch else { return }
+                            patch.category = cat.rawValue
+                            try? persistenceController.container.viewContext.save()
+                        }
+                    }
+                }
+                .disabled(patchSelection.selectedPatch == nil)
+
+                Button(patchSelection.selectedPatch?.isFavorite == true ? "Unfavorite" : "Mark as Favorite") {
+                    guard let patch = patchSelection.selectedPatch else { return }
+                    patch.isFavorite.toggle()
+                    try? persistenceController.container.viewContext.save()
+                }
+                .disabled(patchSelection.selectedPatch == nil)
+
+                Button("Move to Trash") {
+                    guard let patch = patchSelection.selectedPatch else { return }
+                    patch.isTrashed = true
+                    try? persistenceController.container.viewContext.save()
+                }
+                .disabled(patchSelection.selectedPatch == nil)
+
+                Divider()
+
+                Button("Explore from Here…") {
+                    NotificationCenter.default.post(name: .explorePatch, object: patchSelection.selectedPatch)
+                }
+                .disabled(patchSelection.selectedPatch == nil)
+            }
+
             CommandMenu("Library") {
                 Button("Import…") {
                     importPatches(into: persistenceController.container.viewContext)
@@ -291,7 +428,7 @@ struct brWaveApp: App {
 
                 Divider()
 
-                Button("New Library from Selection…") {
+                Button("New Set from Selection…") {
                     let ctx = persistenceController.container.viewContext
                     guard let patch = patchSelection.selectedPatch else { return }
                     let formatter = DateFormatter()
@@ -306,7 +443,15 @@ struct brWaveApp: App {
                 Divider()
 
                 Button("Fetch Synth (All 200 Slots)…") {
-                    MIDIController.shared.fetchEntireSynth()
+                    let ctx = persistenceController.container.viewContext
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+                    let name = "B-Wave — \(formatter.string(from: Date()))"
+                    MIDIController.shared.fetchEntireSynth(into: ctx, libraryName: name)
+                }
+
+                Button("Fetch Range…") {
+                    NotificationCenter.default.post(name: .showFetchRangeSheet, object: nil)
                 }
 
                 Button("Send Selection to Synth…") {
@@ -321,6 +466,29 @@ struct brWaveApp: App {
                     GalaxyEngine.shared.updateAll(in: persistenceController.container.viewContext)
                 }
                 .keyboardShortcut("r", modifiers: [.command, .option])
+
+                Menu("Sort View By") {
+                    let ctx = persistenceController.container.viewContext
+                    Button("Name")             { sortScope(by: .name,          context: ctx) }
+                    Divider()
+                    Button("User Category")    { sortScope(by: .userCategory,  context: ctx) }
+                    Button("Galaxy Category")  { sortScope(by: .galaxyCategory, context: ctx) }
+                    Divider()
+                    Button("Wavetable")        { sortScope(by: .wavetable,     context: ctx) }
+                    Divider()
+                    Button("Envelope: Fast → Slow") { sortScope(by: .envelopeFast, context: ctx) }
+                    Button("Envelope: Slow → Fast") { sortScope(by: .envelopeSlow, context: ctx) }
+                    Divider()
+                    Button("Sonic Journey")    { sortScope(by: .sonicJourney,  context: ctx) }
+                }
+
+                Button("Remove Duplicates in View") {
+                    removeDuplicatesInScope(context: persistenceController.container.viewContext)
+                }
+
+                Button("Remove Duplicates in All Patches…") {
+                    NotificationCenter.default.post(name: .removeDuplicatesAll, object: nil)
+                }
 
                 Divider()
 

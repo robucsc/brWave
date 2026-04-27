@@ -67,6 +67,7 @@ struct BankMemoryView: View {
     )
     private var allPatches: FetchedResults<Patch>
 
+
     @EnvironmentObject private var bankEditorState: BankEditorState
     @EnvironmentObject private var patchSelection:  PatchSelection
 
@@ -169,6 +170,7 @@ struct BankMemoryView: View {
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("PerformPaste")))     { _ in performPaste() }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("PerformClear")))     { _ in performClear() }
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("PerformDuplicate"))) { _ in performDuplicate() }
+            .onReceive(NotificationCenter.default.publisher(for: NSManagedObjectContext.didSaveObjectsNotification, object: context)) { _ in viewEpoch += 1 }
             .onKeyPress(.escape) {
                 patchSelection.selectedIDs          = []
                 bankEditorState.lastTouchedPosition = nil
@@ -189,6 +191,9 @@ struct BankMemoryView: View {
                 ForEach(libraries) { lib in
                     Button {
                         bankEditorState.selectedLibraryID = lib.uuid
+                        if let uuid = lib.uuid {
+                            bankEditorState.patchListMode = .library(uuid, bankIndex: nil)
+                        }
                     } label: {
                         let active = bankEditorState.selectedLibraryID == lib.uuid
                             || (bankEditorState.selectedLibraryID == nil && lib == libraries.first)
@@ -200,11 +205,11 @@ struct BankMemoryView: View {
                     }
                 }
                 Divider()
-                Button("New Library") { createNewLibrary() }
+                Button("New Set") { createNewLibrary() }
             } label: {
-                Label(selectedLibrary?.name ?? "No Library", systemImage: "books.vertical")
+                Label(selectedLibrary?.name ?? "No Set", systemImage: "books.vertical")
             }
-            .help("Switch active library")
+            .help("Switch active set")
         }
 
         ToolbarItem(placement: .navigation) {
@@ -529,7 +534,7 @@ struct BankMemoryView: View {
     // MARK: - Library management
 
     private func createNewLibrary() {
-        let lib = PatchSet.create(named: "New Library", in: context)
+        let lib = PatchSet.create(named: "New Set", in: context)
         try? context.save()
         bankEditorState.selectedLibraryID = lib.uuid
     }

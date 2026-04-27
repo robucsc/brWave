@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		3A0B22A42F9B1D8F00716462 /* bwave update 1.0.11.md in Sources */ = {isa = PBXBuildFile; fileRef = 3A0B22A32F9B1D7B00716462 /* bwave update 1.0.11.md */; };
+		3ADC5A6B2F9EC04300780D0E /* layoutData.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3ADC5A6A2F9EC04300780D0E /* layoutData.txt */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		3ACFD4142F7AE90900E9088F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,9 +29,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		3A0B22A32F9B1D7B00716462 /* bwave update 1.0.11.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "bwave update 1.0.11.md"; sourceTree = "<group>"; };
 		3ACFD4012F7AE90800E9088F /* brWave.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = brWave.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		3ACFD4132F7AE90900E9088F /* brWaveTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = brWaveTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3ACFD41D2F7AE90900E9088F /* brWaveUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = brWaveUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		3ADC5A6A2F9EC04300780D0E /* layoutData.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = layoutData.txt; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -75,6 +82,8 @@
 		3ACFD3F82F7AE90800E9088F = {
 			isa = PBXGroup;
 			children = (
+				3A0B22A32F9B1D7B00716462 /* bwave update 1.0.11.md */,
+				3ADC5A6A2F9EC04300780D0E /* layoutData.txt */,
 				3ACFD4032F7AE90800E9088F /* brWave */,
 				3ACFD4162F7AE90900E9088F /* brWaveTests */,
 				3ACFD4202F7AE90900E9088F /* brWaveUITests */,
@@ -212,6 +221,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3ADC5A6B2F9EC04300780D0E /* layoutData.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -236,6 +246,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3A0B22A42F9B1D8F00716462 /* bwave update 1.0.11.md in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

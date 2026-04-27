@@ -120,7 +120,7 @@ struct PatchListView: View {
             let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
             req.predicate = NSPredicate(format: "uuid == %@", uuid as CVarArg)
             req.fetchLimit = 1
-            let libName = (try? context.fetch(req).first?.name) ?? "Library"
+            let libName = (try? context.fetch(req).first?.name) ?? "Set"
             if let b = bankIdx { return "\(libName) › Bank \(b)" }
             return libName
         }
@@ -214,6 +214,7 @@ private struct EntityPatchList: View {
     let inTrash: Bool
 
     @FetchRequest private var patches: FetchedResults<Patch>
+    @State private var listSelectionID: NSManagedObjectID?
 
     init(predicate: NSPredicate, searchText: String, inTrash: Bool) {
         self.predicate = predicate
@@ -241,22 +242,19 @@ private struct EntityPatchList: View {
             VStack { Spacer(); emptyMessage; Spacer() }
         } else {
             ScrollViewReader { proxy in
-                List {
+                List(selection: $listSelectionID) {
                     ForEach(filtered, id: \.objectID) { patch in
-                    PatchEntityRow(
-                        patch: patch,
-                        isSelected: patchSelection.selectedPatch?.objectID == patch.objectID,
-                        inTrash: inTrash,
-                        onSelect: {
-                            patchSelection.selectedPatch = patch
-                            withAnimation { proxy.scrollTo(patch.objectID, anchor: .center) }
-                        }
-                    )
+                        PatchEntityRow(
+                            patch: patch,
+                            isSelected: listSelectionID == patch.objectID,
+                            inTrash: inTrash
+                        )
+                        .tag(patch.objectID)
                         .id(patch.objectID)
                         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
-                            patchSelection.selectedPatch?.objectID == patch.objectID
+                            listSelectionID == patch.objectID
                                 ? Theme.waveHighlight.opacity(0.15)
                                 : Color.clear
                         )
@@ -264,9 +262,19 @@ private struct EntityPatchList: View {
                 }
                 .listStyle(.plain)
                 .scrollIndicators(.hidden)
+                .tint(.clear)
+                .onChange(of: listSelectionID) { _, id in
+                    guard let id, let patch = filtered.first(where: { $0.objectID == id }) else { return }
+                    if patchSelection.selectedPatch?.objectID != id {
+                        patchSelection.selectedPatch = patch
+                    }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                }
                 .onChange(of: patchSelection.selectedPatch) { _, p in
-                    if let p, filtered.contains(where: { $0.objectID == p.objectID }) {
-                        withAnimation { proxy.scrollTo(p.objectID, anchor: .center) }
+                    let id = p?.objectID
+                    if listSelectionID != id { listSelectionID = id }
+                    if let id, filtered.contains(where: { $0.objectID == id }) {
+                        withAnimation { proxy.scrollTo(id, anchor: .center) }
                     }
                 }
             }
@@ -283,30 +291,47 @@ private struct EntityPatchList: View {
 
 private struct LibraryPatchList: View {
     @EnvironmentObject private var patchSelection: PatchSelection
-    @Environment(\.managedObjectContext) private var context
 
     let libraryID: UUID
     let bankIndex: Int?
     let searchText: String
 
-    private var library: PatchSet? {
-        let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
-        req.predicate = NSPredicate(format: "uuid == %@", libraryID as CVarArg)
-        req.fetchLimit = 1
-        return try? context.fetch(req).first
+    @FetchRequest private var fetchedSlots: FetchedResults<PatchSlot>
+    @FetchRequest private var fetchedLibrary: FetchedResults<PatchSet>
+    @State private var listSelectionID: NSManagedObjectID?
+
+    init(libraryID: UUID, bankIndex: Int?, searchText: String) {
+        self.libraryID = libraryID
+        self.bankIndex = bankIndex
+        self.searchText = searchText
+
+        var slotPredicates: [NSPredicate] = [
+            NSPredicate(format: "patchSet.uuid == %@", libraryID as CVarArg),
+            NSPredicate(format: "patch != nil")
+        ]
+        if let b = bankIndex {
+            slotPredicates.append(NSPredicate(format: "position >= %d AND position <= %d",
+                                              b * 100, b * 100 + 99))
+        }
+        _fetchedSlots = FetchRequest(
+            entity: PatchSlot.entity(),
+            sortDescriptors: [NSSortDescriptor(keyPath: \PatchSlot.position, ascending: true)],
+            predicate: NSCompoundPredicate(andPredicateWithSubpredicates: slotPredicates),
+            animation: .default
+        )
+        _fetchedLibrary = FetchRequest(
+            entity: PatchSet.entity(),
+            sortDescriptors: [],
+            predicate: NSPredicate(format: "uuid == %@", libraryID as CVarArg)
+        )
     }
 
+    private var library: PatchSet? { fetchedLibrary.first }
+
     private var slots: [PatchSlot] {
-        guard let lib = library else { return [] }
-        var all = lib.slotsArray.filter { $0.patch != nil }
-        if let b = bankIndex {
-            let minPos = b * 100
-            let maxPos = minPos + 99
-            all = all.filter { Int($0.position) >= minPos && Int($0.position) <= maxPos }
-        }
-        guard !searchText.isEmpty else { return all }
+        guard !searchText.isEmpty else { return Array(fetchedSlots) }
         let q = searchText.lowercased()
-        return all.filter {
+        return fetchedSlots.filter {
             ($0.patch?.name ?? "").lowercased().contains(q) ||
             ($0.patch?.designer ?? "").lowercased().contains(q)
         }
@@ -332,22 +357,18 @@ private struct LibraryPatchList: View {
             }
         } else {
             ScrollViewReader { proxy in
-                List {
+                List(selection: $listSelectionID) {
                     ForEach(slots, id: \.objectID) { slot in
-                    SlotPatchRow(
-                        slot: slot,
-                        isSelected: patchSelection.selectedPatch?.objectID == slot.patch?.objectID,
-                        onSelect: {
-                            guard let patch = slot.patch else { return }
-                            patchSelection.selectedPatch = patch
-                            withAnimation { proxy.scrollTo(slot.objectID, anchor: .center) }
-                        }
-                    )
+                        SlotPatchRow(
+                            slot: slot,
+                            isSelected: listSelectionID == slot.objectID
+                        )
+                        .tag(slot.objectID)
                         .id(slot.objectID)
                         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
                         .listRowSeparator(.hidden)
                         .listRowBackground(
-                            patchSelection.selectedPatch?.objectID == slot.patch?.objectID
+                            listSelectionID == slot.objectID
                                 ? Theme.waveHighlight.opacity(0.15)
                                 : Color.clear
                         )
@@ -360,9 +381,30 @@ private struct LibraryPatchList: View {
                 }
                 .listStyle(.plain)
                 .scrollIndicators(.hidden)
+                .tint(.clear)
+                .onChange(of: listSelectionID) { _, id in
+                    guard let id, let slot = slots.first(where: { $0.objectID == id }),
+                          let patch = slot.patch else { return }
+                    if patchSelection.selectedPatch?.objectID != patch.objectID {
+                        patchSelection.selectedPatch = patch
+                    }
+                    withAnimation { proxy.scrollTo(id, anchor: .center) }
+                }
                 .onChange(of: patchSelection.selectedPatch) { _, p in
-                    if let p, let slot = slots.first(where: { $0.patch?.objectID == p.objectID }) {
+                    guard let p else { listSelectionID = nil; return }
+                    // If current selection already points to this patch, don't clobber it.
+                    // Prevents the feedback loop: click slot A → loads patch → finds slot B
+                    // (earlier dupe) → overwrites listSelectionID → wrong row highlights.
+                    if let curID = listSelectionID,
+                       slots.first(where: { $0.objectID == curID })?.patch?.objectID == p.objectID {
+                        withAnimation { proxy.scrollTo(curID, anchor: .center) }
+                        return
+                    }
+                    if let slot = slots.first(where: { $0.patch?.objectID == p.objectID }) {
+                        listSelectionID = slot.objectID
                         withAnimation { proxy.scrollTo(slot.objectID, anchor: .center) }
+                    } else {
+                        listSelectionID = nil
                     }
                 }
             }
@@ -376,41 +418,36 @@ private struct PatchEntityRow: View {
     @ObservedObject var patch: Patch
     let isSelected: Bool
     let inTrash: Bool
-    let onSelect: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Theme.waveHighlight.opacity(0.7))
-                    .frame(width: 7, height: 7)
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Theme.waveHighlight.opacity(0.7))
+                .frame(width: 7, height: 7)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(patch.name ?? "Untitled")
-                            .font(.system(size: 12))
-                            .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
-                            .lineLimit(1)
-                        Spacer(minLength: 2)
-                        if patch.isFavorite && !inTrash {
-                            Image(systemName: "star.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(Theme.waveHighlight)
-                        }
-                    }
-                    if let designer = patch.designer, !designer.isEmpty {
-                        Text(designer)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .tracking(0.3)
-                            .lineLimit(1)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(patch.name ?? "Untitled")
+                        .font(.system(size: 12))
+                        .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 2)
+                    if patch.isFavorite && !inTrash {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.waveHighlight)
                     }
                 }
+                if let designer = patch.designer, !designer.isEmpty {
+                    Text(designer)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .tracking(0.3)
+                        .lineLimit(1)
+                }
             }
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 3)
         .contextMenu { PatchContextMenuItems(patch: patch, inTrash: inTrash) }
     }
 }
@@ -420,46 +457,41 @@ private struct PatchEntityRow: View {
 private struct SlotPatchRow: View {
     let slot: PatchSlot
     let isSelected: Bool
-    let onSelect: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Theme.waveHighlight.opacity(0.7))
-                    .frame(width: 7, height: 7)
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Theme.waveHighlight.opacity(0.7))
+                .frame(width: 7, height: 7)
 
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(slot.patch?.name ?? "Untitled")
-                            .font(.system(size: 12))
-                            .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
-                            .lineLimit(1)
-                        Spacer(minLength: 2)
-                        if slot.patch?.isFavorite == true {
-                            Image(systemName: "star.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(Theme.waveHighlight)
-                        }
-                        if let initials = designerInitials {
-                            Text(initials)
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(isSelected ? Theme.waveHighlight.opacity(0.7) : .secondary)
-                        }
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text(slot.patch?.name ?? "Untitled")
+                        .font(.system(size: 12))
+                        .foregroundStyle(isSelected ? Theme.waveHighlight : .primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 2)
+                    if slot.patch?.isFavorite == true {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.waveHighlight)
                     }
-                    if let designer = slot.patch?.designer, !designer.isEmpty {
-                        Text(designer)
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .tracking(0.3)
-                            .lineLimit(1)
+                    if let initials = designerInitials {
+                        Text(initials)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(isSelected ? Theme.waveHighlight.opacity(0.7) : .secondary)
                     }
                 }
+                if let designer = slot.patch?.designer, !designer.isEmpty {
+                    Text(designer)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .tracking(0.3)
+                        .lineLimit(1)
+                }
             }
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 3)
     }
 
     private var designerInitials: String? {
@@ -498,6 +530,11 @@ private struct PatchContextMenuItems: View {
             } label: {
                 Label(patch.isFavorite ? "Remove from Favorites" : "Add to Favorites",
                       systemImage: patch.isFavorite ? "star.fill" : "star")
+            }
+            Button {
+                NotificationCenter.default.post(name: .replicatePatch, object: patch)
+            } label: {
+                Label("Replicate", systemImage: "plus.square.on.square")
             }
             Divider()
             Button(role: .destructive) {

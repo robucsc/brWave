@@ -35,6 +35,12 @@ class GalaxyEngine {
 
     init() {}
 
+    // MARK: - Vector access for Bayesian sampler
+
+    func vector(for patch: Patch) -> [Double] {
+        SimilarityEngine.patchToVector(patch.values)
+    }
+
     // MARK: - Layout bootstrap
 
     func bootstrapLayout(for patch: Patch) {
@@ -88,7 +94,9 @@ class GalaxyEngine {
         guard let patches = try? context.fetch(req) else { return }
 
         for patch in patches {
-            guard let data = patch.values, let g = computeGravity(for: data) else { continue }
+            guard !patch.isTrashed,
+                  !SimilarityEngine.isInitPatch(patch),
+                  let data = patch.values, let g = computeGravity(for: data) else { continue }
             let (jx, jy) = stableJitter(for: patch)
             let displayX = g.x + jx
             let displayY = g.y + jy
@@ -112,8 +120,11 @@ class GalaxyEngine {
 
         var grouped: [PatchCategory: [[Double]]] = [:]
         for patch in patches {
+            guard !patch.isTrashed else { continue }
+            let vec = SimilarityEngine.patchToVector(patch.values)
+            guard !SimilarityEngine.isInitVector(vec) else { continue }
             let cat = PatchCategory.classify(patchName: patch.name ?? "")
-            grouped[cat, default: []].append(SimilarityEngine.patchToVector(patch.values))
+            grouped[cat, default: []].append(vec)
         }
         guard !grouped.isEmpty else { return }
 

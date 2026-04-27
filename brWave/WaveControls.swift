@@ -58,7 +58,7 @@ struct WaveKnobControl: View {
     @Environment(\.waveControlHighlight)  private var colorA   // cyan — Group A
     @Environment(\.waveGroupBHighlight)   private var colorB   // white — Group B
     @Environment(\.waveActiveGroup)       private var group
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
 
     @State private var dragStartNorm: Double = 0
     @GestureState private var isDragging = false
@@ -66,6 +66,7 @@ struct WaveKnobControl: View {
     @State private var isScrolling = false
     @State private var isHovering = false
     @State private var animatedValue: Double = 0  // tracks active group, animated
+    @State private var loadedNorm: Double? = nil  // value at patch load time — drives the reference dot
     @State private var isEditingValue = false
     @State private var editingText = ""
     @State private var shouldFocusEditor = false
@@ -132,7 +133,13 @@ struct WaveKnobControl: View {
                     isScrolling: $isScrolling
                 ))
                 .onHover { isHovering = $0 }
-                .onAppear { animatedValue = normalizedValue }
+                .onAppear {
+                    animatedValue = normalizedValue
+                    if loadedNorm == nil { loadedNorm = normalizedValue }
+                }
+                .onChange(of: patch.objectID) { _, _ in
+                    loadedNorm = normalizedValue   // capture before animation on patch switch
+                }
                 .onChange(of: normalizedValue) { _, v in
                     if isUserDragging {
                         animatedValue = v
@@ -150,21 +157,26 @@ struct WaveKnobControl: View {
     // MARK: - Knob graphic
 
     private func knobGraphic(size s: CGFloat) -> some View {
-        let outerArcW: CGFloat = 3.5
-        let innerArcW: CGFloat = 2.8
-        let capS = s - 20
-        let innerS = s - 14
+        // Group A arc sits at `s` — same position as OBsixer's single arc.
+        // Group B arc floats outside at `s + 10` so the cap can match OBsixer's size.
+        let arcW: CGFloat = 3.5           // Group A arc width (matches OBsixer)
+        let ghostW: CGFloat = 2.5         // Group B ghost arc width
+        let capS = s - 12                  // Cap diameter — matches OBsixer (was s - 20)
+        let ghostS = s + 10               // Group B arc diameter (outside A)
         let trenchColor = Color(white: 0.24)
 
-        // Outer ring = Group A (always), inner ring = Group B (always)
         let aNorm = group == .a ? CGFloat(animatedValue) : CGFloat(normalizedA)
         let bNorm = group == .b ? CGFloat(animatedValue) : CGFloat(normalizedB)
-        let aOpacity: Double = group == .a ? 1.0 : 0.88
-        let bOpacity: Double = group == .b ? 1.0 : 0.96
+        let aOpacity: Double = group == .a ? 1.0 : 0.30
+        let bOpacity: Double = group == .b ? 1.0 : 0.30
+
+        // Dot sits on the active arc at the loaded-value position
+        let aDotRadius = s / 2 - arcW / 2 + 1
+        let bDotRadius = ghostS / 2 - ghostW / 2 + 1
+        let activeDotRadius = group == .a ? aDotRadius : bDotRadius
 
         return ZStack {
-            // Persistent UI highlight: a soft blue halo around the knob body,
-            // not another value arc lane.
+            // Persistent highlight halo
             if !isTuningMode && isPersistentHighlight {
                 Circle()
                     .strokeBorder(colorA.opacity(0.82), lineWidth: max(1.2, s * 0.02))
@@ -172,46 +184,51 @@ struct WaveKnobControl: View {
                     .shadow(color: colorA.opacity(0.45), radius: 4, x: 0, y: 0)
             }
 
-            // Outer track — Group A lane
+            // Group A track (at s — same position as OBsixer arc)
             Circle()
                 .trim(from: 0, to: 0.75)
                 .stroke(trenchColor.opacity(0.42),
-                        style: StrokeStyle(lineWidth: outerArcW, lineCap: .butt))
+                        style: StrokeStyle(lineWidth: arcW, lineCap: .butt))
                 .rotationEffect(.degrees(135))
                 .frame(width: s, height: s)
 
-            // Inner track — Group B lane
+            // Group B track (outside, at ghostS)
             if isPerGroup {
                 Circle()
                     .trim(from: 0, to: 0.75)
-                    .stroke(trenchColor.opacity(0.34),
-                            style: StrokeStyle(lineWidth: innerArcW, lineCap: .butt))
+                    .stroke(trenchColor.opacity(0.28),
+                            style: StrokeStyle(lineWidth: ghostW, lineCap: .butt))
                     .rotationEffect(.degrees(135))
-                    .frame(width: innerS, height: innerS)
+                    .frame(width: ghostS, height: ghostS)
             }
 
-            // Group A arc — always outer ring, cyan
+            // Group A arc
             Circle()
                 .trim(from: 0, to: aNorm * 0.75)
                 .stroke(colorA.opacity(aOpacity),
-                        style: StrokeStyle(lineWidth: outerArcW, lineCap: .round))
+                        style: StrokeStyle(lineWidth: arcW, lineCap: .round))
                 .rotationEffect(.degrees(135))
                 .frame(width: s, height: s)
 
-            // Group B arc — always inner ring, white
+            // Group B arc (outside ghost ring)
             if isPerGroup {
                 Circle()
                     .trim(from: 0, to: bNorm * 0.75)
-                    .stroke(Color.black.opacity(0.55),
-                            style: StrokeStyle(lineWidth: innerArcW + 1.0, lineCap: .round))
-                    .rotationEffect(.degrees(135))
-                    .frame(width: innerS, height: innerS)
-                Circle()
-                    .trim(from: 0, to: bNorm * 0.75)
                     .stroke(colorB.opacity(bOpacity),
-                            style: StrokeStyle(lineWidth: innerArcW, lineCap: .round))
+                            style: StrokeStyle(lineWidth: ghostW, lineCap: .round))
                     .rotationEffect(.degrees(135))
-                    .frame(width: innerS, height: innerS)
+                    .frame(width: ghostS, height: ghostS)
+            }
+
+            // Reference dot — marks where the active group's value was on load
+            // Only visible when the knob has moved from its loaded position
+            if let ln = loadedNorm, abs(ln - Double(animatedValue)) > 0.015 {
+                Circle()
+                    .fill(activeColor)
+                    .overlay(Circle().stroke(Color(white: 0.12), lineWidth: 1.2))
+                    .frame(width: 4.5, height: 4.5)
+                    .offset(y: -activeDotRadius)
+                    .rotationEffect(.degrees(ln * 270 - 135))
             }
 
             // Cap

@@ -20,6 +20,10 @@ extension Notification.Name {
     static let bankMemoryOpenEditor    = Notification.Name("bankMemoryOpenEditor")
     static let purgeLibrary            = Notification.Name("purgeLibrary")
     static let applyNamesFromClipboard = Notification.Name("applyNamesFromClipboard")
+    static let showFetchRangeSheet     = Notification.Name("showFetchRangeSheet")
+    static let removeDuplicatesAll     = Notification.Name("removeDuplicatesAll")
+    static let replicatePatch          = Notification.Name("replicatePatch")
+    static let explorePatch            = Notification.Name("explorePatch")
 }
 
 // MARK: - Sidebar Items
@@ -36,7 +40,7 @@ enum SidebarItem: Hashable {
         case .allPatches:              return "All Patches"
         case .favorites:               return "Favorites"
         case .trash:                   return "Trash"
-        case .library:                 return "Library"
+        case .library:                 return "Set"
         case .libraryBank(_, let b):   return "Bank \(b)"
         }
     }
@@ -86,7 +90,10 @@ struct ContentView: View {
     @State private var viewMode: AppViewMode = .editor
     @State private var inspectorPresented = true
     @State private var inspectorContent   = InspectorBox(id: "empty", view: AnyView(EmptyView()))
-    @State private var showingNamesSheet   = false
+    @State private var showingNamesSheet      = false
+    @State private var showingFetchRangeSheet = false
+    @State private var showingExplorer        = false
+    @State private var explorerPatch: Patch?
     @StateObject private var sampleMapperState = SampleMapperState()
     @AppStorage("patchListVisible") private var patchListVisible = true
 
@@ -108,14 +115,14 @@ struct ContentView: View {
                 let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
                 req.predicate = NSPredicate(format: "uuid == %@", uuid as CVarArg)
                 req.fetchLimit = 1
-                let name = (try? context.fetch(req).first?.name) ?? "Library"
+                let name = (try? context.fetch(req).first?.name) ?? "Set"
                 sources.insert(BankSource(libraryID: uuid, libraryName: name, bankIndex: bankIdx))
             case .library(let uuid):
                 let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
                 req.predicate = NSPredicate(format: "uuid == %@", uuid as CVarArg)
                 req.fetchLimit = 1
                 if let lib = try? context.fetch(req).first {
-                    let name = lib.name ?? "Library"
+                    let name = lib.name ?? "Set"
                     var banks = Set<Int>()
                     lib.slotsArray.forEach { banks.insert($0.bankIndex) }
                     banks.forEach { sources.insert(BankSource(libraryID: uuid, libraryName: name, bankIndex: $0)) }
@@ -147,6 +154,107 @@ struct ContentView: View {
             bankEditorState.patchListMode = .library(uuid, bankIndex: bankIdx)
             patchListVisible = true
         }
+    }
+
+    private func replicatePatch(_ patch: Patch?) {
+        // Multi-select: replicate all selected patches when more than one is selected.
+        let ids = patchSelection.selectedIDs
+        if ids.count > 1 {
+            replicatePatches(ids)
+            return
+        }
+        guard let src = patch else { return }
+
+        let copy = Patch(context: context)
+        copy.copyStoredState(from: src, nameOverride: (src.name ?? "Untitled") + " (copy)")
+        copy.uuid = UUID()
+
+        // Slot it into the current library if in library mode.
+        if case .library(let libraryID, let bankIndex) = bankEditorState.patchListMode {
+            let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
+            req.predicate = NSPredicate(format: "uuid == %@", libraryID as CVarArg)
+            req.fetchLimit = 1
+            if let library = try? context.fetch(req).first {
+                let occupied = Set(library.slotsArray.compactMap { $0.patch != nil ? Int($0.position) : nil })
+                let srcPos = library.slotsArray.first(where: { $0.patch?.objectID == src.objectID }).map { Int($0.position) }
+                var nextFree = (srcPos ?? occupied.max() ?? -1) + 1
+                let bankMin = bankIndex.map { $0 * 100 } ?? 0
+                let bankMax = bankIndex.map { $0 * 100 + 199 } ?? 199
+                nextFree = max(nextFree, bankMin)
+                while occupied.contains(nextFree) && nextFree <= bankMax { nextFree += 1 }
+                if nextFree <= bankMax {
+                    PatchSlot.make(position: nextFree, patch: copy, in: library, ctx: context)
+                }
+            }
+        }
+
+        try? context.save()
+        patchSelection.selectedPatch = copy
+    }
+
+    private func replicatePatches(_ ids: Set<NSManagedObjectID>) {
+        // Fetch all selected patches and sort by slot position so copies land in the same order.
+        let sources: [Patch] = ids.compactMap { context.object(with: $0) as? Patch }
+
+        guard !sources.isEmpty else { return }
+
+        var copies: [Patch] = []
+
+        if case .library(let libraryID, let bankIndex) = bankEditorState.patchListMode,
+           let library = fetchLibrary(id: libraryID) {
+
+            // Sort sources by their current slot position.
+            let slotByID: [NSManagedObjectID: Int] = Dictionary(
+                uniqueKeysWithValues: library.slotsArray.compactMap { slot in
+                    guard let p = slot.patch else { return nil }
+                    return (p.objectID, Int(slot.position))
+                }
+            )
+            let sorted = sources.sorted {
+                (slotByID[$0.objectID] ?? Int.max) < (slotByID[$1.objectID] ?? Int.max)
+            }
+
+            // Grow the occupied set as each copy is placed, so copies don't collide.
+            var occupied = Set(library.slotsArray.compactMap { $0.patch != nil ? Int($0.position) : nil })
+            let bankMin = bankIndex.map { $0 * 100 } ?? 0
+            let bankMax = bankIndex.map { $0 * 100 + 199 } ?? 199
+
+            for src in sorted {
+                let copy = Patch(context: context)
+                copy.copyStoredState(from: src, nameOverride: (src.name ?? "Untitled") + " (copy)")
+                copy.uuid = UUID()
+                copies.append(copy)
+
+                let srcPos = slotByID[src.objectID] ?? occupied.max() ?? -1
+                var nextFree = srcPos + 1
+                nextFree = max(nextFree, bankMin)
+                while occupied.contains(nextFree) && nextFree <= bankMax { nextFree += 1 }
+                if nextFree <= bankMax {
+                    PatchSlot.make(position: nextFree, patch: copy, in: library, ctx: context)
+                    occupied.insert(nextFree)
+                }
+            }
+        } else {
+            // Outside library mode — just create the entities, no slots.
+            for src in sources {
+                let copy = Patch(context: context)
+                copy.copyStoredState(from: src, nameOverride: (src.name ?? "Untitled") + " (copy)")
+                copy.uuid = UUID()
+                copies.append(copy)
+            }
+        }
+
+        try? context.save()
+        // Select all copies so the user can see what was created.
+        patchSelection.selectedIDs  = Set(copies.map { $0.objectID })
+        patchSelection.selectedPatch = copies.last
+    }
+
+    private func fetchLibrary(id: UUID) -> PatchSet? {
+        let req: NSFetchRequest<PatchSet> = PatchSet.fetchRequest()
+        req.predicate = NSPredicate(format: "uuid == %@", id as CVarArg)
+        req.fetchLimit = 1
+        return try? context.fetch(req).first
     }
 
     var body: some View {
@@ -207,9 +315,31 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .applyNamesFromClipboard)) { _ in
             showingNamesSheet = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .showFetchRangeSheet)) { _ in
+            showingFetchRangeSheet = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .replicatePatch)) { note in
+            let patch = (note.object as? Patch) ?? patchSelection.selectedPatch
+            replicatePatch(patch)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .explorePatch)) { note in
+            let patch = (note.object as? Patch) ?? patchSelection.selectedPatch
+            guard let patch else { return }
+            explorerPatch    = patch
+            showingExplorer  = true
+        }
         .sheet(isPresented: $showingNamesSheet) {
             PatchNamesSheet()
                 .environment(\.managedObjectContext, context)
+        }
+        .sheet(isPresented: $showingFetchRangeSheet) {
+            FetchRangeSheet()
+                .environment(\.managedObjectContext, context)
+        }
+        .sheet(isPresented: $showingExplorer) {
+            if let patch = explorerPatch {
+                BayesianExplorerSheet(patch: patch, context: context)
+            }
         }
     }
 }
@@ -234,7 +364,8 @@ struct SidebarView: View {
     @State private var deleteTarget: PatchSet?
     @State private var renameTarget: PatchSet?
     @State private var renameText = ""
-    @State private var showingPurgeDialog = false
+    @State private var showingPurgeDialog  = false
+    @State private var showingDedupDialog  = false
 
     private func occupiedBanks(for lib: PatchSet) -> [Int] {
         var banks = Set<Int>()
@@ -269,10 +400,10 @@ struct SidebarView: View {
             }
 
             Section(header: HStack {
-                Text("Libraries")
+                Text("Sets")
                 Spacer()
                 Button {
-                    let lib = PatchSet.create(named: "New Library", in: context)
+                    let lib = PatchSet.create(named: "New Set", in: context)
                     try? context.save()
                     selection = [.library(lib.uuid!)]
                 } label: {
@@ -280,7 +411,7 @@ struct SidebarView: View {
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .buttonStyle(.borderless)
-                .help("New Library")
+                .help("New Set")
             }) {
                     ForEach(libraries) { lib in
                         let uuid = lib.uuid!
@@ -323,7 +454,7 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .navigationTitle("brWave")
         .searchable(text: .constant(""), placement: .sidebar, prompt: "Search")
-        .alert("Delete Library?",
+        .alert("Delete Set?",
                isPresented: Binding(get: { deleteTarget != nil },
                                     set: { if !$0 { deleteTarget = nil } })) {
             Button("Cancel", role: .cancel) { deleteTarget = nil }
@@ -338,16 +469,23 @@ struct SidebarView: View {
                 deleteTarget = nil
             }
         } message: {
-            Text("\"\(deleteTarget?.name ?? "")\" and its slot assignments will be removed.")
+            Text("The set \"\(deleteTarget?.name ?? "")\" and its slot assignments will be removed.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .purgeLibrary)) { _ in
             showingPurgeDialog = true
         }
         .sheet(isPresented: $showingPurgeDialog) {
-            LibraryPurgeDialog()
+            LibraryPurgeDialog(mode: .purgeAll)
                 .environment(\.managedObjectContext, context)
         }
-        .alert("Rename Library", isPresented: Binding(
+        .onReceive(NotificationCenter.default.publisher(for: .removeDuplicatesAll)) { _ in
+            showingDedupDialog = true
+        }
+        .sheet(isPresented: $showingDedupDialog) {
+            LibraryPurgeDialog(mode: .removeAllDuplicates)
+                .environment(\.managedObjectContext, context)
+        }
+        .alert("Rename Set", isPresented: Binding(
             get: { renameTarget != nil },
             set: { if !$0 { renameTarget = nil } }
         )) {
@@ -378,6 +516,14 @@ struct DetailView: View {
     @Environment(\.managedObjectContext) var context
 
     var body: some View {
+        contentView
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                BulkTransferBanner()
+            }
+    }
+
+    @ViewBuilder
+    private var contentView: some View {
         switch viewMode {
         case .editor:
             HStack(spacing: 0) {
@@ -401,6 +547,53 @@ struct DetailView: View {
             MIDIMonitorView()
         case .settings:
             SettingsView()
+        }
+    }
+}
+
+// MARK: - Bulk Transfer Banner
+
+private struct BulkTransferBanner: View {
+    @ObservedObject private var midi = MIDIController.shared
+
+    var body: some View {
+        if midi.isBulkTransferActive {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if !midi.bulkOperationLabel.isEmpty {
+                            Text(midi.bulkOperationLabel)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                        }
+                        ProgressView(value: midi.bulkTransferProgress)
+                            .progressViewStyle(.linear)
+                            .tint(Theme.waveHighlight)
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    let done = Int((midi.bulkTransferProgress * Double(midi.bulkTotalCount)).rounded())
+                    Text("\(done) / \(midi.bulkTotalCount)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 60, alignment: .trailing)
+
+                    Button {
+                        midi.cancelBulkTransfer()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel transfer")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.easeInOut(duration: 0.2), value: midi.isBulkTransferActive)
         }
     }
 }
@@ -441,6 +634,123 @@ private struct AppViewModePicker: View {
         }
         .padding(3)
         .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Fetch Range Sheet
+
+struct FetchRangeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.managedObjectContext) private var context
+
+    @State private var bank: Int = 0
+    @State private var fromSlot: Int = 0
+    @State private var toSlot: Int = 99
+    @State private var libraryName: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Fetch Patches from Synth")
+                .font(.headline)
+
+            Picker("Bank", selection: $bank) {
+                Text("Bank 0 — Factory").tag(0)
+                Text("Bank 1 — PPG Classic").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: bank)     { _, _ in refreshName() }
+            .onChange(of: fromSlot) { _, _ in refreshName() }
+            .onChange(of: toSlot)   { _, _ in refreshName() }
+
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("From slot")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("0", value: $fromSlot, formatter: slotFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .onChange(of: fromSlot) { _, v in
+                            fromSlot = max(0, min(99, v))
+                            if toSlot < fromSlot { toSlot = fromSlot }
+                        }
+                }
+                Text("–")
+                    .padding(.top, 16)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("To slot")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField("99", value: $toSlot, formatter: slotFormatter)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .onChange(of: toSlot) { _, v in
+                            toSlot = max(fromSlot, min(99, v))
+                        }
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text("Slots")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("\(toSlot - fromSlot + 1)")
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(Theme.waveHighlight)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Save into set")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                TextField("Library name", text: $libraryName)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Divider()
+
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Fetch") {
+                    let name = libraryName.trimmingCharacters(in: .whitespaces).isEmpty
+                        ? defaultLibraryName() : libraryName.trimmingCharacters(in: .whitespaces)
+                    MIDIController.shared.fetchRange(bank: bank, fromSlot: fromSlot, toSlot: toSlot,
+                                                     into: context, libraryName: name)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.waveHighlight)
+                .keyboardShortcut(.defaultAction)
+                .disabled(MIDIController.shared.isBulkTransferActive)
+            }
+        }
+        .padding(24)
+        .frame(width: 360)
+        .onAppear { libraryName = defaultLibraryName() }
+    }
+
+    private func defaultLibraryName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let date = formatter.string(from: Date())
+        if fromSlot == 0 && toSlot == 99 {
+            return "B-Wave B\(bank) — \(date)"
+        }
+        return "B-Wave B\(bank) P\(String(format: "%02d", fromSlot))–P\(String(format: "%02d", toSlot)) — \(date)"
+    }
+
+    private func refreshName() {
+        libraryName = defaultLibraryName()
+    }
+
+    private var slotFormatter: NumberFormatter {
+        let f = NumberFormatter()
+        f.minimum = 0
+        f.maximum = 99
+        f.allowsFloats = false
+        return f
     }
 }
 

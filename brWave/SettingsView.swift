@@ -13,8 +13,10 @@ private let settingsFieldWidth: CGFloat = 320
 
 struct SettingsView: View {
     @ObservedObject var midi = MIDIController.shared
-    @AppStorage("autoSendPatchOnSelection") private var autoSendPatchOnSelection = false
-    @AppStorage("sampleMapperPathDisplayMode") private var sampleMapperPathDisplayMode = "homeRelative"
+    @AppStorage("autoSendPatchOnSelection")     private var autoSendPatchOnSelection    = false
+    @AppStorage("sampleMapperPathDisplayMode")  private var sampleMapperPathDisplayMode  = "homeRelative"
+    @AppStorage("importSkipInitPatches")        private var importSkipInitPatches        = true
+    @AppStorage("importDeduplicateOnImport")    private var importDeduplicateOnImport    = true
 
     var body: some View {
         ScrollView {
@@ -107,6 +109,24 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             Toggle("Auto-send patch to WAVE", isOn: $autoSendPatchOnSelection)
                             Text("When enabled, selecting a patch in the library immediately sends it to the Wave edit buffer.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    SettingsCard(title: "Import") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Toggle("Skip blank init patches", isOn: $importSkipInitPatches)
+                            Text("Patches with no sound content (all parameters at default) are silently skipped on import.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            Divider()
+
+                            Toggle("Remove duplicate patches", isOn: $importDeduplicateOnImport)
+                            Text("Identical patches within the same import batch are collapsed to one. Run Library › Remove Duplicates to clean up across all sets.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)

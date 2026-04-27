@@ -151,13 +151,14 @@ Plan for a dedicated Arp panel plus a fuller sequence editor.
 
 ## Critical Layout Rules
 
-- Detailed panel-editor notes now live in `PANEL_EDITOR_VIEW_UPGRADE_NOTES.md`.
+- Detailed panel-editor notes now live in `PANEL_EDITOR_VIEW_UPGRADE_NOTES.md` (renamed to `PANEL_EDITOR_IMPLEMENTATION_GUIDE.md` 2026-04-26).
 - Use a single canonical layout service for section frames, control frames, knob sizes, selection, alignment, distribution, export, and persistence.
 - Store section frames, not only section sizes. Dense synth panels need movable/resizable sections.
 - Give section selections prefixed IDs such as `panel:LFO` so panels and controls can share one selection model.
 - Align and size-match against the key selected object, using displayed frames during active drags.
-- Keep tuning mode developer-only: wrench, outlines, inspector popovers, resize handles, alignment toolbar, and export controls should not clutter normal editing.
-- Source-control stable layout defaults after tuning, while keeping user overrides layered above them.
+- Keep tuning mode developer-only: wrench, outlines, inspector popovers, resize handles, alignment toolbar, and export controls should be `#if DEBUG` only — strip completely from release builds.
+- **One map rule**: `PanelLayout.plist` in the source directory is the sole layout authority. Do not introduce a second active source (Swift constants, App Support, UserDefaults). `defaultPanelFrame` is dead fallback code for brand-new panels not yet in the plist — not a competing map.
+- `#filePath` (not `#file`) gives the absolute source path at compile time — use it to locate the plist regardless of clone location.
 - Ignore repo-local Xcode derived-data folders (`.derived/`, `.deriveddata/`) so build/index artifacts do not pollute panel commits.
 
 ---
@@ -174,6 +175,86 @@ Plan for a dedicated Arp panel plus a fuller sequence editor.
 ---
 
 ## Session Log
+
+### Session 9 — 2026-04-25
+
+#### Import Policy
+
+Two user-controlled settings added to Settings > Import card:
+
+- **Skip blank init patches on import** (default ON) — uses `SimilarityEngine.isInitPatch(_:)` (vector magnitude threshold, not name matching) to filter patches that are effectively blank. Applies to all importers: Behringer SYX, V8, FXB/Waldorf, Microwave.
+- **Remove duplicate patches on import** (default ON) — runs `SimilarityEngine.removeDuplicates(from:in:)` (Euclidean distance) on the current import batch only. Does not cross-check the existing library.
+
+Both default to ON using `UserDefaults.standard.register(defaults:)` in `brWaveApp.init()` so they read correctly before the user has ever visited Settings.
+
+Init detection runs after `patchValues` is set. Dedup runs on the batch after all patches are created.
+
+#### Replicate Command
+
+"Replicate" creates an independent copy of the selected patch: new UUID, new entity in CoreData, same payload. A renamed Patch with a different UUID — not a slot pointer to the same patch.
+
+- Library menu: ⌘⌥D
+- Context menu on patch row (non-trash path)
+- Fires `.replicatePatch` notification → `ContentView.replicatePatch(_:)` handles it
+- Name suffix: " (copy)"
+- Slots immediately after source in current library
+
+This distinguishes from the edit-menu Duplicate (system-level action). The name "Replicate" was chosen deliberately to contrast with "Duplicate" and to be unambiguous in a patch menu context.
+
+#### Performance Panel Split
+
+The PERFORMANCE section was split into two independent panels:
+
+- **Performance** (260 × 521 px) — OSCILLATOR, BENDER, TUNING controls
+- **Voice Tuning** (120 × 521 px) — V1–V8 per-voice semitone knobs
+
+Both panels are the same height as all other top-row panels (521 px). The Voice Tuning panel seeds to the right of Performance in `defaultPanelFrame`. The split makes both sections independently repositionable and resizable.
+
+#### PanelLayoutService — Persistence Architecture (2026-04-26)
+
+The layout service uses a **plist file in the source directory as the single map**. There is no App Support directory, no UserDefaults, no JSON file, no competing Swift defaults at runtime.
+
+**How it works:**
+
+- `PanelLayout.plist` lives at `brWave/brWave/PanelLayout.plist` — inside the git repo, next to the Swift source files.
+- `#filePath` in `PanelLayoutService.swift` resolves at compile time to the absolute path of that file, regardless of where the repo is cloned.
+- On launch, `load()` reads the plist. All three maps (panels, controls, knobSizes) come from this one file.
+- Every mutation calls `saveSoon()` — a 0.3s debounced write back to the same plist.
+- On app quit, `willTerminateNotification` triggers `saveNow()` — a synchronous flush.
+- The plist is pre-populated with all panel and control positions tuned in-app (from the 2026-04-26 session). `defaultPanelFrame` in WavePanelView is emergency fallback only for new panels not yet in the file — which after the initial population is never.
+
+**Why plist over JSON:** XML plist is a native Apple format, Xcode can open it as a structured editor, and git diffs are readable. Upgrading to field-deliverable updates (App Support copy-on-first-launch) is a clean future migration — just change where the file is read/written.
+
+**Edit mode is DEBUG-only.** The wrench button, dashed overlays, drag handles, alignment toolbar, and inspector popovers are all conditional on `#if DEBUG`. The plist ships in the bundle for release builds as the factory layout, but users never see the edit controls.
+
+**`removePanelFrame(_:)` replaces the old `resetSectionSize(_:)`** — removes the stored key so the panel re-seeds from `defaultPanelFrame` on next display.
+
+All files that reference the service (`WavePanelView.swift`, `WaveControls.swift`, `NudgeableModifier.swift`, `AlignmentToolbar.swift`) use `PanelLayoutService` (no synth prefix — generic infrastructure).
+
+#### Knob Redesign — Cap Size and Dual Arc
+
+The Group A/B dual-arc knob had a problem: the Group B arc was placed *inside* the Group A arc (at `s - 14`), forcing the cap to shrink to `s - 20` to leave clearance. This made the physical knob body 8 px smaller than the OBsixer knob at the same nominal size.
+
+**Fix: move Group B arc outside.**
+
+| Measurement | Before | After | OBsixer |
+|---|---|---|---|
+| Cap diameter | `s - 20` | `s - 12` | `s - 12` |
+| Group A arc | `s` | `s` | `s` (only arc) |
+| Group B arc | `s - 14` (inner) | `s + 10` (outer) | — |
+
+The cap now matches OBsixer exactly. Group B floats as a ghost ring beyond the A arc. Both tracks (A at `s`, B at `s + 10`) always render; only the opacity changes based on the active group: active = 1.0, inactive = 0.30 (was 0.88/0.96, which made inactive arcs nearly indistinguishable).
+
+#### Reference Dot
+
+A small dot (4.5 px, colored to match the active group) is drawn on the active arc at the position the knob had when the patch was last loaded. It appears only when the current value has moved more than ~1.5% from the loaded position, so it's invisible until the user actually tweaks the knob.
+
+- Captured in `@State private var loadedNorm: Double?`
+- Set on `.onAppear` (once, guards with `if loadedNorm == nil`)
+- Refreshed on `onChange(of: patch.objectID)` so switching patches updates the reference
+- When viewing Group A the dot sits on the A arc track; when viewing Group B it sits on the B ghost arc
+
+OBsixer had the infrastructure for this (the `originalNormalizedValue` code path) but the capture method `captureOriginalIfNeeded` was never called, so the dot never rendered. The brWave implementation is wired and active.
 
 ### Session 8 — 2026-04-23
 
@@ -354,3 +435,82 @@ Plan for a dedicated Arp panel plus a fuller sequence editor.
 
 **Decisions made:**
 - Rather than waiting on legacy PPG patch documentation to build translators, we rely on the custom `.syx` Patch Generator to populate UI with test patches.
+
+---
+
+### Session 11: Factory Naming + Response-Driven Bulk Fetch (2026-04-23)
+
+#### What was done
+
+**FactoryPatchNames.swift** — New file. Root cause of "B0 P00" labels was confirmed: Behringer Wave firmware always returns bytes 0–15 as "1111111111111111", ignoring names entirely (confirmed via KnobKraft-ORM adaptation for firmware 1.0.11). Implemented 3-tier naming:
+1. Positional lookup — `namesByPosition[bank×100+program]` — full 200-name table from manual pp.30–32. Fast, exact for unmodified factory patches in original slots.
+2. Vector nearest-neighbour — `factoryName(nearestTo:threshold:)` using `vectorRegistry` — identifies factory patches even when moved to different slots. Registry populated by `buildVectorRegistry(from:)` after factory SYX import.
+3. Generated fallback — `"{WT slot name} OO/SS"` from wavetb + wavesOsc÷2 + wavesSub÷2.
+
+Name bytes are NOT in `WavePatchValues` (only synth parameters go there), so the "1111..." placeholder has zero effect on vectors. The same patch fetched from hardware and imported from SYX will have identical vectors.
+
+**Patch+Helpers.swift** — `importParsed` updated to call `FactoryPatchNames.resolve()`. No more position labels.
+
+**MIDIController — response-driven bulk operations rewrite:**
+- **Before**: blind 60ms timer between fetch requests (200 slots × 60ms = 12s dead time added on top of hardware round-trip).
+- **After**: SPKT 0x06 response fires the next SPKT 0x05 request. Hardware round-trip IS the pacing. 600ms timeout safety net skips unresponsive slots. Same model for sends: SPKT 0x0A ACK fires next send, 800ms fallback.
+- `handleIncomingSysEx` now routes on SPKT byte — 0x06/0x08 → parse patch, 0x0A/0x0C → `handleSendAck()`.
+- Background CoreData: `PersistenceController.shared.container.newBackgroundContext()` for all Patch/PatchSlot creation and saves during bulk fetch. Next fetch request fires immediately after kicking off background work — DB write and hardware round-trip genuinely overlap. `viewContext.automaticallyMergesChangesFromParent = true` already set in Persistence.swift so UI updates flow through automatically.
+- Replaced `bulkFetchContext/PatchSet` refs with `bulkFetchPatchSetID: NSManagedObjectID` — correct cross-context reference pattern.
+
+**UI/UX:**
+- "Sets" rename throughout — all user-visible "Library/Libraries" → "Set/Sets". Code identifiers (`selectedLibraryID` etc.) unchanged.
+- `FetchRangeSheet` — bank picker + from/to slot range + auto-named set. Posted via `Notification.Name.showFetchRangeSheet`.
+- `BulkTransferBanner` — shows `bulkOperationLabel` ("Fetching…" / "Sending…") and `bulkTotalCount`.
+
+#### Key decisions
+- Use the vector system for factory patch identification (not MD5/fingerprints) so the same infrastructure serves naming, Galaxy, and similarity features.
+- "Library" = all patches ever imported. "Set" = named collection (1+ banks, arbitrary). "Bank" = 100-slot hardware bank.
+- WaveTables.swift data is confirmed wrong (128×256 extracted, correct is 64×128). Do NOT build WT fingerprinting or descriptors until reextracted.
+
+#### Completed in session 12
+1. ~~**`buildVectorRegistry(from:)`**~~ — DONE. Wired at startup and after SYX import.
+2. **Test bulk fetch with hardware** — still pending, not yet verified on real hardware.
+3. ~~**Init detection + dedup**~~ — DONE. See session 12.
+4. **WaveTables.swift reextraction** at 64×128 — still pending.
+5. **Settings toggle** — still pending.
+
+#### Pending / backlog
+- Sort By submenu: Similarity to Selected, Most Unique First, Parameter Value
+- Generate submenu: Interpolate, Mutate, Journey
+- Hardware control for original PPG Wave 2.2/2.3 (Manufacturer ID `0x29`)
+
+---
+
+### Session 12: Init Detection, Dedup, Galaxy Cleanup (2026-04-24)
+
+#### What was done
+
+**`buildVectorRegistry` wired up** — called at app startup in `brWaveApp.swift` `.onAppear` and after every SYX import in `WaveSysExImporter`. Tier-2 vector name matching now fires automatically.
+
+**`SimilarityEngine.isInitVector / isInitPatch`** — detects patches with all parameters at default (lower-bound) values. Vector magnitude < 0.04 = init. These are placeholder slots (e.g. "Init Program") with no sound content. Threshold chosen to catch genuine blanks while not touching patches where even 1-2 params have been touched.
+
+**`SimilarityEngine.removeDuplicates(from:in:)`** — exact dedup within a patch list. Rounds vector components to 6dp to avoid float noise, groups by key, keeps earliest `dateCreated`, deletes the rest. Returns count removed.
+
+**`GalaxyEngine` — init + trash filter** — both `setupAnchorsFromRealPatches` and `updateAll` now skip trashed patches and init patches before building anchors or placing stars. Previously a bank with 40 real patches + 60 "Init Program" slots would pull all anchor centroids toward zero and compress the real patches into a corner.
+
+**`WaveSysExImporter` — init gate** — both `importSyx` and `importBytes` now skip init patches at creation time (`context.delete(patch); continue`). The "Init Program" flood in imported banks is gone.
+
+**`LibraryPurgeDialog` — generalised** — added `LibraryPurgeMode` enum (`.purgeAll`, `.removeAllDuplicates`). Title, description, backup toggle label, action label, and backup filename suffix are all mode-driven. Both modes write the unconditional hidden safety backup to `Application Support/brWave/Backups/` before executing — user never loses data even if they dismiss the optional export panel.
+
+**Two dedup menu items in Library menu:**
+- *Remove Duplicates in View* — instant, no dialog. Scope: multi-selection if active, else current library/bank from sidebar, else nothing. Safe for everyday post-import cleanup.
+- *Remove Duplicates in All Patches…* — triggers the two-checkbox confirmation sheet (backup toggle + "I understand this cannot be undone"). Operates across entire library. Same friction as Purge Library because same class of broad operation.
+
+#### Key decisions
+- Init patches are silently dropped at import — no user prompt needed, they have zero musical value.
+- Galaxy filters inits at layout time too, so existing libraries clean up on next Rebuild Galaxy.
+- "All patches" dedup requires the confirmation dialog; scoped dedup does not. The scope determines the friction.
+- Hidden backup is unconditional on all destructive operations — it's the safety net that doesn't require the user to remember anything.
+
+#### Next session — start here
+1. **Test bulk fetch + factory naming with hardware connected** — not yet verified on real hardware. Verify names arrive correctly, progress banner, set populates.
+2. **WaveTables.swift reextraction** at 64×128 — NOT YET DONE. Current data is 128×256 (wrong). Prerequisite for WT fingerprinting.
+3. **Settings toggle** — NOT YET DONE. "Use wavetable timbral fingerprinting" (`UserDefaults` key `"similarityUseWavetable"`, default OFF).
+4. **Sort By submenu** — NOT YET DONE. Similarity to Selected, Most Unique First, Parameter Value.
+5. **Generate submenu** — NOT YET DONE. Interpolate, Mutate, Journey.

@@ -231,46 +231,103 @@ class MIDIController: ObservableObject {
 
     @Published var bulkTransferProgress: Double = 0.0
     @Published var isBulkTransferActive: Bool = false
-    private var bulkTransferWorkItem: DispatchWorkItem?
+    @Published var bulkOperationLabel: String = ""
+    @Published var bulkTotalCount: Int = 0
 
-    /// Sequentially fetches all 200 slots (Bank 0 and Bank 1) from the Behringer Wave.
-    func fetchEntireSynth() {
+    // Fetch state — response-driven (SPKT 0x06 fires the next request)
+    private var bulkFetchSlots:    [(bank: Int, program: Int)] = []
+    private var bulkFetchIndex:    Int = 0
+    private var bulkFetchPatchSetID: NSManagedObjectID?
+    private var bulkFetchTimeoutItem: DispatchWorkItem?
+
+    // Send state — ACK-driven (SPKT 0x0A fires the next send)
+    private var bulkSendPayloads:  [(bank: Int, program: Int, payload: [UInt8])] = []
+    private var bulkSendIndex:     Int = 0
+    private var bulkSendTimeoutItem: DispatchWorkItem?
+
+    /// Sequentially fetches all 200 slots from the synth and saves into a named library.
+    func fetchEntireSynth(into context: NSManagedObjectContext, libraryName: String) {
+        let slots = (0..<200).map { i in (bank: i / 100, program: i % 100) }
+        startBulkFetch(slots: slots, label: "Fetching all 200 slots…",
+                       context: context, libraryName: libraryName)
+    }
+
+    /// Fetches a contiguous range of preset slots from one bank and saves into a named library.
+    func fetchRange(bank: Int, fromSlot: Int, toSlot: Int,
+                    into context: NSManagedObjectContext, libraryName: String) {
+        guard bank == 0 || bank == 1 else { return }
+        let start = max(0, min(fromSlot, 99))
+        let end   = max(start, min(toSlot, 99))
+        let slots = (start...end).map { (bank: bank, program: $0) }
+        guard !slots.isEmpty else { return }
+        let label = slots.count == 1
+            ? "Fetching B\(bank) P\(String(format: "%02d", start)) from synth…"
+            : "Fetching B\(bank) P\(String(format: "%02d", start))–P\(String(format: "%02d", end)) (\(slots.count) slots)…"
+        startBulkFetch(slots: slots, label: label, context: context, libraryName: libraryName)
+    }
+
+    private func startBulkFetch(slots: [(bank: Int, program: Int)], label: String,
+                                 context: NSManagedObjectContext, libraryName: String) {
         guard !isBulkTransferActive else { return }
         isBulkTransferActive = true
         bulkTransferProgress = 0.0
-        
-        let totalSlots = 200
-        var currentSlot = 0
-        
-        func fetchNext() {
-            guard currentSlot < totalSlots, isBulkTransferActive else {
-                isBulkTransferActive = false
-                bulkTransferProgress = 1.0
-                return
-            }
-            
-            let bank = currentSlot / 100
-            let program = currentSlot % 100
-            
-            requestPreset(bank: bank, program: program)
-            
-            bulkTransferProgress = Double(currentSlot) / Double(totalSlots)
-            currentSlot += 1
-            
-            let work = DispatchWorkItem { fetchNext() }
-            bulkTransferWorkItem = work
-            // 60ms gap prevents buffer overflow on the hardware side
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
-        }
-        
-        fetchNext()
+        bulkTotalCount = slots.count
+        bulkOperationLabel = label
+
+        // Create (or reuse) the destination set on the main context, save to get a permanent ID.
+        let patchSet = PatchSet.findOrCreate(named: libraryName, in: context)
+        patchSet.modifiedAt = Date()
+        try? context.save()
+        bulkFetchPatchSetID = patchSet.objectID
+
+        bulkFetchSlots = slots
+        bulkFetchIndex = 0
+        sendNextFetchRequest()
     }
-    
+
+    /// Send the next preset-request to the hardware.
+    /// Called initially by startBulkFetch, then again each time SPKT 0x06 arrives.
+    private func sendNextFetchRequest() {
+        bulkFetchTimeoutItem?.cancel()
+        guard isBulkTransferActive, bulkFetchIndex < bulkFetchSlots.count else {
+            finishBulkFetch()
+            return
+        }
+        let s = bulkFetchSlots[bulkFetchIndex]
+        requestPreset(bank: s.bank, program: s.program)
+        bulkTransferProgress = Double(bulkFetchIndex) / Double(bulkFetchSlots.count)
+        bulkFetchIndex += 1
+
+        // Safety net: if hardware doesn't respond within 600ms, skip and continue.
+        let timeout = DispatchWorkItem { [weak self] in
+            self?.addComment("⚠ No response for slot \(s.bank)/\(s.program) — skipping")
+            self?.sendNextFetchRequest()
+        }
+        bulkFetchTimeoutItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: timeout)
+    }
+
+    private func finishBulkFetch() {
+        isBulkTransferActive = false
+        bulkTransferProgress = 1.0
+        bulkFetchSlots    = []
+        bulkFetchIndex    = 0
+        bulkFetchPatchSetID = nil
+        bulkFetchTimeoutItem?.cancel()
+        bulkFetchTimeoutItem = nil
+    }
+
     /// Halt any active bulk transfer
     func cancelBulkTransfer() {
-        bulkTransferWorkItem?.cancel()
+        bulkFetchTimeoutItem?.cancel()
+        bulkSendTimeoutItem?.cancel()
         isBulkTransferActive = false
         bulkTransferProgress = 0.0
+        bulkFetchSlots    = []
+        bulkFetchIndex    = 0
+        bulkFetchPatchSetID = nil
+        bulkSendPayloads  = []
+        bulkSendIndex     = 0
     }
 
     /// Sequentially dumps an array of patches to the synth, starting at Bank 0, Program 0 or a specified target.
@@ -278,37 +335,42 @@ class MIDIController: ObservableObject {
         guard !isBulkTransferActive else { return }
         isBulkTransferActive = true
         bulkTransferProgress = 0.0
-        
+
         let total = patches.count
-        var currentIndex = 0
-        
-        func sendNext() {
-            guard currentIndex < total, isBulkTransferActive else {
-                isBulkTransferActive = false
-                bulkTransferProgress = 1.0
-                return
-            }
-            
-            let patch = patches[currentIndex]
-            if let payload = patch.rawSysexPayload {
-                let slotIndex = startProgram + currentIndex
-                let bank = targetBank + (slotIndex / 100)
-                let program = slotIndex % 100
-                if bank <= 1 { // Only 2 banks available on the Wave
-                    sendPreset(bank: bank, program: program, payload: Array(payload))
-                }
-            }
-            
-            bulkTransferProgress = Double(currentIndex) / Double(total)
-            currentIndex += 1
-            
-            let work = DispatchWorkItem { sendNext() }
-            bulkTransferWorkItem = work
-            // Hardware needs slightly more time to digest memory writes vs reads
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: work)
+        bulkTotalCount = total
+        bulkOperationLabel = "Sending \(total) patch\(total == 1 ? "" : "es") to synth…"
+
+        // Snapshot payloads now so we don't hold CoreData objects on a background queue.
+        bulkSendPayloads = patches.enumerated().compactMap { idx, patch in
+            guard let data = patch.rawSysexPayload else { return nil }
+            let slotIndex = startProgram + idx
+            let bank      = targetBank + (slotIndex / 100)
+            let program   = slotIndex % 100
+            guard bank <= 1 else { return nil }
+            return (bank: bank, program: program, payload: Array(data))
         }
-        
-        sendNext()
+        bulkSendIndex = 0
+        sendNextPatch()
+    }
+
+    private func sendNextPatch() {
+        bulkSendTimeoutItem?.cancel()
+        guard isBulkTransferActive, bulkSendIndex < bulkSendPayloads.count else {
+            isBulkTransferActive = false
+            bulkTransferProgress = 1.0
+            bulkSendPayloads = []
+            bulkSendIndex = 0
+            return
+        }
+        let entry = bulkSendPayloads[bulkSendIndex]
+        sendPreset(bank: entry.bank, program: entry.program, payload: entry.payload)
+        bulkTransferProgress = Double(bulkSendIndex) / Double(bulkSendPayloads.count)
+        bulkSendIndex += 1
+
+        // Safety net: if hardware doesn't ACK within 800ms, send next anyway.
+        let timeout = DispatchWorkItem { [weak self] in self?.sendNextPatch() }
+        bulkSendTimeoutItem = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: timeout)
     }
 
     // MARK: - Receiving
@@ -447,11 +509,53 @@ class MIDIController: ObservableObject {
     }
 
     private func handleIncomingSysEx(_ bytes: [UInt8]) {
-        guard let patch = WaveSysExParser.parse(bytes) else { return }
-        DispatchQueue.main.async { self.handleParsedPatch(patch) }
+        guard bytes.count > 9 else { return }
+        let spkt = bytes[9]
+        switch spkt {
+        case WaveSysEx.spktPresetData, WaveSysEx.spktEditBufData:
+            if let patch = WaveSysExParser.parse(bytes) {
+                DispatchQueue.main.async { self.handleParsedPatch(patch) }
+            }
+        case WaveSysEx.spktPresetAck, WaveSysEx.spktEditBufAck:
+            // Hardware acknowledged a preset write — send the next one.
+            DispatchQueue.main.async { self.handleSendAck() }
+        default:
+            break
+        }
+    }
+
+    private func handleSendAck() {
+        guard isBulkTransferActive, !bulkSendPayloads.isEmpty else { return }
+        sendNextPatch()
     }
 
     private func handleParsedPatch(_ parsed: WaveParsedPatch) {
+        // Bulk fetch path — cancel timeout, save on a background context, fire next request.
+        if let patchSetID = bulkFetchPatchSetID {
+            bulkFetchTimeoutItem?.cancel()
+
+            // Hand off all CoreData work to a background context.
+            // newBackgroundContext() saves directly to the store and auto-merges into viewContext.
+            let bgCtx = PersistenceController.shared.container.newBackgroundContext()
+            let parsedCopy = parsed   // WaveParsedPatch is a value type — safe to capture
+            bgCtx.perform {
+                let patch = Patch(context: bgCtx)
+                patch.uuid        = UUID()
+                patch.dateCreated = Date()
+                patch.importParsed(parsedCopy)
+                if let bank = parsedCopy.bank, let prog = parsedCopy.program, bank >= 0, prog >= 0 {
+                    let bgPatchSet = bgCtx.object(with: patchSetID) as! PatchSet
+                    PatchSlot.make(position: bank * 100 + prog, patch: patch, in: bgPatchSet, ctx: bgCtx)
+                }
+                try? bgCtx.save()
+            }
+
+            // Fire the next request immediately — don't wait for the DB write.
+            sendNextFetchRequest()
+            return
+        }
+
+        // Live-edit path — update whichever patch is currently selected.
         guard let selection = patchSelection,
               let patch = selection.selectedPatch,
               let ctx = patch.managedObjectContext else { return }

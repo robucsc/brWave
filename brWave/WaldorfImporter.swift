@@ -37,7 +37,9 @@ enum WaldorfImporter {
     /// (no dual-group in a standalone FXP — user can diverge Group B afterwards).
     @MainActor
     static func importFXP(urls: [URL], into context: NSManagedObjectContext) {
-        var totalImported = 0
+        let skipInits = UserDefaults.standard.bool(forKey: "importSkipInitPatches")
+        let dedup     = UserDefaults.standard.bool(forKey: "importDeduplicateOnImport")
+        var newPatches: [Patch] = []
 
         for url in urls {
             guard let data = try? Data(contentsOf: url),
@@ -63,21 +65,30 @@ enum WaldorfImporter {
             patch.patchValues     = valuesFromPayload(payload)
             patch.category        = PatchCategory.classify(patchName: patchName).rawValue
 
-            // Each FXP imports as its own single-patch library
+            if skipInits && SimilarityEngine.isInitPatch(patch) {
+                context.delete(patch)
+                continue
+            }
+
             let libName = url.deletingPathExtension().lastPathComponent
             let patchSet = PatchSet.findOrCreate(named: libName, in: context)
             patchSet.modifiedAt = Date()
             PatchSlot.make(position: 0, patch: patch, in: patchSet, ctx: context)
-            totalImported += 1
+            newPatches.append(patch)
         }
 
-        if totalImported > 0 { try? context.save() }
+        guard !newPatches.isEmpty else { return }
+        if dedup { SimilarityEngine.removeDuplicates(from: newPatches, in: context) }
+        try? context.save()
+        FactoryPatchNames.buildVectorRegistry(from: context)
     }
 
     /// Import .fxb files from the provided URLs.
     @MainActor
     static func importFXB(urls: [URL], into context: NSManagedObjectContext) {
-        var totalImported = 0
+        let skipInits = UserDefaults.standard.bool(forKey: "importSkipInitPatches")
+        let dedup     = UserDefaults.standard.bool(forKey: "importDeduplicateOnImport")
+        var newPatches: [Patch] = []
 
         for url in urls {
             guard let data = try? Data(contentsOf: url) else { continue }
@@ -85,7 +96,6 @@ enum WaldorfImporter {
             let records = parseFPChRecords(from: data)
             guard records.count >= 2 else { continue }
 
-            // Pair consecutive records: (A, B) per patch
             let patchCount = records.count / 2
             guard patchCount > 0 else { continue }
 
@@ -116,15 +126,20 @@ enum WaldorfImporter {
                 patch.patchValues     = valuesFromPayload(payload)
                 patch.category        = PatchCategory.classify(patchName: patchName).rawValue
 
-                // Assign sequential slot positions (0-based within the library)
+                if skipInits && SimilarityEngine.isInitPatch(patch) {
+                    context.delete(patch)
+                    continue
+                }
+
                 PatchSlot.make(position: n, patch: patch, in: patchSet, ctx: context)
-                totalImported += 1
+                newPatches.append(patch)
             }
         }
 
-        if totalImported > 0 {
-            try? context.save()
-        }
+        guard !newPatches.isEmpty else { return }
+        if dedup { SimilarityEngine.removeDuplicates(from: newPatches, in: context) }
+        try? context.save()
+        FactoryPatchNames.buildVectorRegistry(from: context)
     }
 }
 
@@ -447,6 +462,7 @@ private func valuesFromPayload(_ payload: [UInt8]) -> WavePatchValues {
 
     // Shared
     pv.setValue(Int(payload[16]), for: .wavetb, group: .a)
+    pv.setValue(Int(payload[16]), for: .wavetb, group: .b)
     pv.setValue(Int(payload[17]), for: .split,  group: .a)
     pv.setValue(Int(payload[18]), for: .keyb,   group: .a)
 

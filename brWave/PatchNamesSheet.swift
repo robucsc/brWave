@@ -149,11 +149,11 @@ struct PatchNamesSheet: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 20)
             } else {
-                Text("Found \(parsed.count) name\(parsed.count == 1 ? "" : "s"). Choose which library and bank to apply them to.")
+                Text("Found \(parsed.count) name\(parsed.count == 1 ? "" : "s"). Choose which set and bank to apply them to.")
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 12) {
-                    Picker("Library", selection: $selectedLibraryID) {
+                    Picker("Set", selection: $selectedLibraryID) {
                         ForEach(libraries) { lib in
                             Text(lib.name ?? "Untitled").tag(lib.uuid as UUID?)
                         }

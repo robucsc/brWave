@@ -76,7 +76,7 @@ enum NudgeControlType {
 struct NudgeControlInspector: View {
     let id:          String
     let controlType: NudgeControlType?
-    @ObservedObject private var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject private var canonicalLayoutService = PanelLayoutService.shared
     @Environment(\.panelZoomScale) var zoom
     @State private var originXText = ""
     @State private var originYText = ""
@@ -293,7 +293,7 @@ struct NudgeControlInspector: View {
 struct NudgeableModifier: ViewModifier {
     let id:          String
     var controlType: NudgeControlType? = nil
-    @ObservedObject var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject var canonicalLayoutService = PanelLayoutService.shared
     @Environment(\.isTuningMode) var isTuningMode
 
     @State private var showInspector = false
@@ -365,14 +365,23 @@ struct NudgeableModifier: ViewModifier {
         if isTuningMode {
             view
                 .contentShape(Rectangle())
-                .highPriorityGesture(tuningDragGesture, including: .all)
+                .onTapGesture {
+                    showInspector = false
+                    let shift = NSEvent.modifierFlags.contains(.shift)
+                    if shift {
+                        canonicalLayoutService.toggleSelection(id)
+                    } else {
+                        canonicalLayoutService.select(id)
+                    }
+                }
+                .gesture(tuningDragGesture)
         } else {
             view
         }
     }
 
     private var tuningDragGesture: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .named("wavePanel"))
+        DragGesture(minimumDistance: 3, coordinateSpace: .named("wavePanel"))
             .onChanged { value in
                 guard isTuningMode else { return }
 
@@ -408,21 +417,7 @@ struct NudgeableModifier: ViewModifier {
                     tuningDragActive = false
                     shiftToggleHandledOnBegin = false
                 }
-
-                let moved = value.translation.width.magnitude > 3 || value.translation.height.magnitude > 3
-                if moved {
-                    canonicalLayoutService.commitDrag()
-                } else {
-                    let shift = NSEvent.modifierFlags.contains(.shift)
-                    if shift {
-                        if !shiftToggleHandledOnBegin {
-                            canonicalLayoutService.toggleSelection(id)
-                        }
-                    } else {
-                        canonicalLayoutService.select(id)
-                    }
-                    canonicalLayoutService.activeDragDelta = .zero
-                }
+                canonicalLayoutService.commitDrag()
             }
     }
 }

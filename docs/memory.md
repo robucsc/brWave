@@ -4,14 +4,29 @@ State file for session continuity. Update at end of each session. This is the qu
 
 ---
 
-## Current State (2026-04-11)
+## Current State (2026-04-24, session 12)
 
-**Phase**: Session 9 handoff state. Full patch format ecosystem import is running. We successfully closed out the vintage PPG Wavetable ROM extraction—ensuring perfect 128-sample AIFF exports utilizing the authentic "back-to-front phase inverted" mirroring logic. The task now shifts toward closing the *export* loop, making brWave the ultimate Universal Bridge.
+**Phase**: Library quality pass complete. Init detection, dedup, Galaxy anchor fix all done. Read `brWave_bible.md` for full session logs — it is the authoritative dev journal.
 
-**New since Session 8 (this session):**
-- `docs/ppg_wavetable_rom_mechanics.md` — NEW: Architectural archive detailing the 64-byte half-cycle compression, the phase-inverted mirroring interpolation, and the authentic hardcoded 8-bit integer overflows found in the real PPG ROMs.
-- `make_aiffs.py` / `PPG_AIFFs/` — Successfully generated perfect baseline AIFF files from the 30 extracted ROM arrays for Hibiki testing.
-- `V8Importer.swift` — PPG Wave V8x SysEx bank importer (F0 29 01 0D, nibble-encoded), wired into import menu (done out-of-band by Claude, integrated fully here).
+**Recently completed (sessions 11–12):**
+- `FactoryPatchNames.swift` — 3-tier naming (positional → vector → generated). `buildVectorRegistry` called at startup and after SYX import.
+- `importParsed` — uses `FactoryPatchNames.resolve()`, no more "B0 P00" labels
+- Bulk fetch/send — response-driven (SPKT 0x06/0x0A ACKs pace requests); background `newBackgroundContext()` for all DB saves during fetch
+- `SimilarityEngine.isInitPatch` — detects all-default patches; skipped at import, filtered from Galaxy
+- `SimilarityEngine.removeDuplicates` — exact dedup (distance=0.0) within a patch list
+- `GalaxyEngine` — filters trashed + init patches from anchor build and layout pass
+- `LibraryPurgeDialog` — generalised with `LibraryPurgeMode` enum; handles purge + all-patches dedup; unconditional hidden backup on all destructive ops
+- Library menu: "Remove Duplicates in View" (scoped, instant) + "Remove Duplicates in All Patches…" (dialog, whole library)
+- "Sets" rename throughout UI; `FetchRangeSheet`; `BulkTransferBanner`
+
+**What's next (start here next session):**
+1. **Test bulk fetch with hardware** — verify factory names arrive correctly, progress banner, set populates in sidebar. Not yet verified with real hardware.
+2. **WaveTables.swift reextraction** at 64×128 — NOT YET DONE. Current data is 128×256 (wrong). Prerequisite for WT fingerprinting. Re-record from hardware or find correct ROM dump.
+3. **Settings toggle** — NOT YET DONE. "Use wavetable timbral fingerprinting" (`UserDefaults` key `"similarityUseWavetable"`, default OFF), wire into SimilarityEngine.
+4. **Sort By submenu** — NOT YET DONE. Similarity to Selected, Most Unique First, Parameter Value.
+5. **Generate submenu** — NOT YET DONE. Interpolate, Mutate, Journey.
+
+**From previous sessions (still pending):**
 
 **What exists:**
 - `CLAUDE.md` at project root — full technical briefing, read first
@@ -44,6 +59,16 @@ State file for session continuity. Update at end of each session. This is the qu
 - Keyboard/zone layout has been substantially improved from the first pass
 - Loop handles are in decent shape for a first pass
 - There is active local work in `SampleMapperView.swift` from the interrupted Antigravity session; do not overwrite it blindly
+
+**Progress since last snapshot (session 10+):**
+- Knobs are working on the panel — turning a knob on the hardware updates the panel via NRPN
+- OSC wavetable plot shows the current wavetable visually, including which cycle OSC and Sub are set to in the patch (pre-modulation)
+- Wavetable send to hardware: implemented and working (ping-pong ACK protocol resolves "Header Wrong" issue caused by GCD timer coalescing)
+- Transient send to hardware: implemented and working. Key discovery: sample count determines pitched/looped behavior (128, 2048, 8192 = looped+pitched; other sizes = drum/static). brWave pads to 8192 by default.
+- Bulk fetch (200-slot) and bulk send operational from Library menu
+- Smart Library Search Service wired into Galaxy inspector (AI + keyword fallback)
+- LibraryPurgeDialog exists for full library wipe with backup
+- `bulkTransferProgress` / `isBulkTransferActive` published but NOT yet shown in any UI — silent 30-90s operations need a progress overlay
 
 **What's next from here:**
 1. **Playback path**:

@@ -41,7 +41,9 @@ enum V8Importer {
     /// Import V8 .syx bank files.
     @MainActor
     static func importV8(urls: [URL], into context: NSManagedObjectContext) {
-        var totalImported = 0
+        let skipInits = UserDefaults.standard.bool(forKey: "importSkipInitPatches")
+        let dedup     = UserDefaults.standard.bool(forKey: "importDeduplicateOnImport")
+        var newPatches: [Patch] = []
 
         for url in urls {
             guard let data = try? Data(contentsOf: url) else { continue }
@@ -77,14 +79,20 @@ enum V8Importer {
                 patch.patchValues     = valuesFromPayload(payload)
                 patch.category        = PatchCategory.classify(patchName: patchName).rawValue
 
+                if skipInits && SimilarityEngine.isInitPatch(patch) {
+                    context.delete(patch)
+                    continue
+                }
+
                 PatchSlot.make(position: n, patch: patch, in: patchSet, ctx: context)
-                totalImported += 1
+                newPatches.append(patch)
             }
         }
 
-        if totalImported > 0 {
-            try? context.save()
-        }
+        guard !newPatches.isEmpty else { return }
+        if dedup { SimilarityEngine.removeDuplicates(from: newPatches, in: context) }
+        try? context.save()
+        FactoryPatchNames.buildVectorRegistry(from: context)
     }
 
     @MainActor
@@ -92,16 +100,19 @@ enum V8Importer {
                                libraryName: String,
                                sourceFileName: String,
                                into context: NSManagedObjectContext) {
-        let patchSet = PatchSet.findOrCreate(named: libraryName, in: context)
+        let skipInits = UserDefaults.standard.bool(forKey: "importSkipInitPatches")
+        let dedup     = UserDefaults.standard.bool(forKey: "importDeduplicateOnImport")
+        let patchSet  = PatchSet.findOrCreate(named: libraryName, in: context)
         patchSet.modifiedAt = Date()
 
-        var totalImported = 0
+        var slotIndex = 0
+        var newPatches: [Patch] = []
 
         for message in messages {
             guard let patches = parseV8Bank(message) else { continue }
 
-            for (n, v8) in patches.enumerated() {
-                let patchName = importName(v8BaseName(patchNumber: totalImported + n), sourceMarker: "8")
+            for (_, v8) in patches.enumerated() {
+                let patchName = importName(v8BaseName(patchNumber: slotIndex), sourceMarker: "8")
                 let payload = buildPayload(v8: v8, patchName: patchName)
 
                 let patch = Patch(context: context)
@@ -115,20 +126,25 @@ enum V8Importer {
                     extra: "MIDI SysEx import"
                 )
                 patch.bank            = -1
-                patch.program         = Int16(totalImported + n)
+                patch.program         = Int16(slotIndex)
                 patch.rawSysexPayload = Data(payload)
                 patch.patchValues     = valuesFromPayload(payload)
                 patch.category        = PatchCategory.classify(patchName: patchName).rawValue
 
-                PatchSlot.make(position: totalImported + n, patch: patch, in: patchSet, ctx: context)
+                if skipInits && SimilarityEngine.isInitPatch(patch) {
+                    context.delete(patch)
+                } else {
+                    PatchSlot.make(position: slotIndex, patch: patch, in: patchSet, ctx: context)
+                    newPatches.append(patch)
+                }
+                slotIndex += 1
             }
-
-            totalImported += patches.count
         }
 
-        if totalImported > 0 {
-            try? context.save()
-        }
+        guard !newPatches.isEmpty else { return }
+        if dedup { SimilarityEngine.removeDuplicates(from: newPatches, in: context) }
+        try? context.save()
+        FactoryPatchNames.buildVectorRegistry(from: context)
     }
 }
 
@@ -313,6 +329,7 @@ private func valuesFromPayload(_ payload: [UInt8]) -> WavePatchValues {
     let bBase = WaveParameters.groupBBase   // 70
 
     pv.setValue(Int(payload[16]), for: .wavetb, group: .a)
+    pv.setValue(Int(payload[16]), for: .wavetb, group: .b)
     pv.setValue(Int(payload[17]), for: .split,  group: .a)
     pv.setValue(Int(payload[18]), for: .keyb,   group: .a)
 

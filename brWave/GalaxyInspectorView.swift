@@ -104,7 +104,7 @@ struct GalaxyInspectorView: View {
                                 .foregroundStyle(Theme.waveHighlight)
                         }
                         
-                        Button("Save as New Bank") {
+                        Button("Save as New Set") {
                             newLibraryFromSearchResults()
                         }
                         .buttonStyle(.borderedProminent)

@@ -9,7 +9,7 @@
 import SwiftUI
 
 struct AlignmentToolbar: View {
-    @ObservedObject var canonicalLayoutService = WavePanelLayoutService.shared
+    @ObservedObject var canonicalLayoutService = PanelLayoutService.shared
 
     private var hasSelection: Bool {
         !canonicalLayoutService.selectedIDs.isEmpty

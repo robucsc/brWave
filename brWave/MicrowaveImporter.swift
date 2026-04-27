@@ -20,7 +20,9 @@ enum MicrowaveImporter {
 
     @MainActor
     static func importSyx(urls: [URL], into context: NSManagedObjectContext) {
-        var totalImported = 0
+        let skipInits = UserDefaults.standard.bool(forKey: "importSkipInitPatches")
+        let dedup     = UserDefaults.standard.bool(forKey: "importDeduplicateOnImport")
+        var newPatches: [Patch] = []
 
         for url in urls {
             guard let data = try? Data(contentsOf: url) else { continue }
@@ -54,14 +56,20 @@ enum MicrowaveImporter {
                 patch.patchValues     = microwaveValuesFromPayload(conversion.payload)
                 patch.category        = PatchCategory.classify(patchName: conversion.name).rawValue
 
+                if skipInits && SimilarityEngine.isInitPatch(patch) {
+                    context.delete(patch)
+                    continue
+                }
+
                 PatchSlot.make(position: index, patch: patch, in: patchSet, ctx: context)
-                totalImported += 1
+                newPatches.append(patch)
             }
         }
 
-        if totalImported > 0 {
-            try? context.save()
-        }
+        guard !newPatches.isEmpty else { return }
+        if dedup { SimilarityEngine.removeDuplicates(from: newPatches, in: context) }
+        try? context.save()
+        FactoryPatchNames.buildVectorRegistry(from: context)
     }
 
     @MainActor
@@ -69,6 +77,8 @@ enum MicrowaveImporter {
                                libraryName: String,
                                sourceFileName: String,
                                into context: NSManagedObjectContext) {
+        let skipInits = UserDefaults.standard.bool(forKey: "importSkipInitPatches")
+        let dedup     = UserDefaults.standard.bool(forKey: "importDeduplicateOnImport")
         var sounds: [MicrowaveSound] = []
 
         for message in messages {
@@ -83,6 +93,7 @@ enum MicrowaveImporter {
 
         let patchSet = PatchSet.findOrCreate(named: libraryName, in: context)
         patchSet.modifiedAt = Date()
+        var newPatches: [Patch] = []
 
         for (index, mw) in sounds.enumerated() {
             let conversion = buildPayload(from: mw, patchNumber: index)
@@ -103,10 +114,19 @@ enum MicrowaveImporter {
             patch.patchValues     = microwaveValuesFromPayload(conversion.payload)
             patch.category        = PatchCategory.classify(patchName: conversion.name).rawValue
 
+            if skipInits && SimilarityEngine.isInitPatch(patch) {
+                context.delete(patch)
+                continue
+            }
+
             PatchSlot.make(position: index, patch: patch, in: patchSet, ctx: context)
+            newPatches.append(patch)
         }
 
+        guard !newPatches.isEmpty else { return }
+        if dedup { SimilarityEngine.removeDuplicates(from: newPatches, in: context) }
         try? context.save()
+        FactoryPatchNames.buildVectorRegistry(from: context)
     }
 }
 

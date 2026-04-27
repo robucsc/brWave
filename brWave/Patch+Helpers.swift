@@ -17,17 +17,23 @@ extension Patch {
 
     /// Populate the patch from a parsed Wave SysEx message.
     func importParsed(_ parsed: WaveParsedPatch) {
-        // Behringer Wave firmware quirk: names in factory SysEx dumps are
-        // filled with 0x31 ('1') — a placeholder, not the actual preset name.
-        // Fall back to bank/program position so patches are distinguishable.
+        // Behringer Wave firmware quirk: name bytes 0–15 are always "1111111111111111"
+        // regardless of the actual preset name — the hardware ignores them entirely.
+        // Use FactoryPatchNames three-tier resolution:
+        //   1. Positional lookup (bank/program → factory name table)
+        //   2. Vector nearest-neighbour (requires buildVectorRegistry to be called first)
+        //   3. Generated fallback: "{WT slot name} {oscPos}/{subPos}"
         let isPlaceholder = parsed.name.allSatisfy { $0 == "1" } || parsed.name.trimmingCharacters(in: .whitespaces).isEmpty
         let patchName: String
         if isPlaceholder {
-            if let b = parsed.bank, let p = parsed.program {
-                patchName = "B\(b) P\(String(format: "%02d", p))"
-            } else {
-                patchName = "Untitled"
-            }
+            let wavetb   = parsed.wavetb
+            let wavesOsc = parsed.groupA[.wavesOsc] ?? 0
+            let wavesSub = parsed.groupA[.wavesSub] ?? 0
+            patchName = FactoryPatchNames.resolve(
+                bank: parsed.bank, program: parsed.program,
+                vector: nil,   // vector unavailable pre-save; vector matching via buildVectorRegistry
+                wavetb: wavetb, wavesOsc: wavesOsc, wavesSub: wavesSub
+            )
         } else {
             patchName = parsed.name
         }
@@ -65,8 +71,13 @@ extension Patch {
             }
             var pv = WavePatchValues()
             for (key, val) in dict {
-                // Keys are of form "DELAY_A", "DELAY_B", or "WAVETB" (shared)
                 pv.setRaw(key: key, value: val)
+            }
+            // Migrate patches stored before WAVETB switched to per-group keys.
+            // Old format: "WAVETB" (shared). New format: "WAVETB_A" / "WAVETB_B".
+            if let shared = dict["WAVETB"] {
+                if dict["WAVETB_A"] == nil { pv.setRaw(key: "WAVETB_A", value: shared) }
+                if dict["WAVETB_B"] == nil { pv.setRaw(key: "WAVETB_B", value: shared) }
             }
             return pv
         }
@@ -121,6 +132,29 @@ extension Patch {
             name: .waveParameterChanged, object: self,
             userInfo: ["id": id, "old": old, "new": value, "group": group]
         )
+    }
+
+    /// Re-pack the current patchValues into rawSysexPayload so hardware send stays
+    /// in sync after the Bayesian generator or any other tool writes to patch.values.
+    func rebuildRawSysex(name nameOverride: String? = nil) {
+        let pv = patchValues
+        var groupA: [WaveParamID: Int] = [:]
+        var groupB: [WaveParamID: Int] = [:]
+        for id in WaveParamID.allCases {
+            guard WaveParameters.sysexByteA(for: id) != nil else { continue }
+            groupA[id] = pv.value(for: id, group: .a)
+            groupB[id] = pv.value(for: id, group: .b)
+        }
+        let parsed = WaveParsedPatch(
+            name:     String((nameOverride ?? self.name ?? "Generated").prefix(16)),
+            wavetb:   pv.value(for: .wavetb, group: .a),
+            split:    pv.value(for: .split,  group: .a),
+            keyb:     pv.value(for: .keyb,   group: .a),
+            groupA:   groupA,
+            groupB:   groupB,
+            rawBytes: []
+        )
+        rawSysexPayload = Data(WaveSysExParser.buildPayload(from: parsed))
     }
 
     /// Raw 121-byte preset payload for lossless SysEx round-trip.

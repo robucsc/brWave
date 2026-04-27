@@ -18,6 +18,8 @@ struct PatchInspectorView: View {
     @State private var editingName = false
     @State private var nameText = ""
     @State private var sendFeedback: String? = nil
+    @State private var similarExpanded = false
+    @State private var similarMatches: [SimilarityEngine.Match] = []
 
     var body: some View {
         ScrollView {
@@ -29,6 +31,8 @@ struct PatchInspectorView: View {
                 metadataSection
                 Divider().padding(.vertical, 8)
                 categorySection
+                Divider().padding(.vertical, 8)
+                similarSection
             }
             .padding(16)
         }
@@ -215,6 +219,114 @@ struct PatchInspectorView: View {
             .buttonStyle(.plain)
             .padding(.top, 4)
         }
+    }
+
+    // MARK: - Similar Patches
+    //
+    // Searches from the Bayesian prior (patchSelection.priorPatch), not the
+    // selected patch. The prior only moves when you jump far enough in vector
+    // space, so browsing nearby patches keeps recommendations stable.
+    // A small indicator shows when the prior differs from the current selection.
+
+    private var priorIsDifferent: Bool {
+        guard let prior = patchSelection.priorPatch else { return false }
+        return prior.objectID != patch.objectID
+    }
+
+    private var similarSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    similarExpanded.toggle()
+                }
+                if similarExpanded && similarMatches.isEmpty {
+                    loadSimilarMatches()
+                }
+            } label: {
+                HStack {
+                    Label("Similar Patches", systemImage: "sparkles")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if priorIsDifferent {
+                        // Prior is anchored elsewhere — show which patch it's from
+                        Text("anchored: \(patchSelection.priorPatch?.name ?? "?")")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.waveHighlight.opacity(0.8))
+                            .lineLimit(1)
+                    }
+                    Image(systemName: similarExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if similarExpanded {
+                if priorIsDifferent {
+                    Button {
+                        patchSelection.resetPrior()
+                        loadSimilarMatches()
+                    } label: {
+                        Text("Reset anchor to this patch")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.waveHighlight)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, 4)
+                }
+
+                if similarMatches.isEmpty {
+                    Text("No similar patches found")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 4)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(similarMatches) { match in
+                            Button {
+                                patchSelection.selectedPatch = match.patch
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Circle()
+                                        .fill(match.patch.patchCategory.color)
+                                        .frame(width: 6, height: 6)
+                                    Text(match.patch.name ?? "Untitled")
+                                        .font(.caption)
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Text(String(format: "%.2f", match.score))
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(.vertical, 4)
+                                .padding(.horizontal, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .fill(patchSelection.selectedPatch?.objectID == match.patch.objectID
+                                              ? Theme.waveHighlight.opacity(0.15) : Color.clear)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .onChange(of: patch.objectID) { _, _ in
+            similarMatches = []
+            if similarExpanded { loadSimilarMatches() }
+        }
+        .onChange(of: patchSelection.priorPatch?.objectID) { _, _ in
+            similarMatches = []
+            if similarExpanded { loadSimilarMatches() }
+        }
+    }
+
+    private func loadSimilarMatches() {
+        let anchor = patchSelection.priorPatch ?? patch
+        similarMatches = SimilarityEngine.findSimilar(to: anchor, in: context, limit: 8)
     }
 
     // MARK: - Helpers
